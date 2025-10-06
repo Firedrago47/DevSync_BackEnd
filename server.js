@@ -38,16 +38,18 @@ io.on('connection', (socket) => {
     socket.to(roomId).emit('language-change', language);
   });
 
-  socket.on('run-code', async ({ code, language, roomId }) => {
-    const result = await runCode(code, language);
-    io.to(roomId).emit('code-output', result);
-    try {
-      await uploadCode(roomId, code);
-      console.log(`Code for room ${roomId} uploaded to S3`);
-    } catch (err) {
-      console.error(`Failed to upload code for room ${roomId}:`, err);
-    }
-  });
+  socket.on('run-code', async ({ code, roomId }) => {
+  const result = await runCode(code); // Python only
+  io.to(roomId).emit('code-output', result);
+
+  try {
+    await uploadCode(roomId, code);
+    console.log(`Code for room ${roomId} uploaded to S3`);
+  } catch (err) {
+    console.error(`Failed to upload code for room ${roomId}:`, err);
+  }
+});
+
 });
 
 server.listen(6969, () => console.log('Backend running on http://localhost:6969'));

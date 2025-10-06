@@ -1,0 +1,24 @@
+{
+  "name": "devsync-backend",
+  "version": "1.0.0",
+  "description": "\"# DevSync_BackEnd\"",
+  "main": "aws.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.1692.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.1.0",
+    "socket.io": "^4.8.1",
+    "vm2": "^3.9.19"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
