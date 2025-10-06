@@ -1,10 +1,1 @@
-# Node modules
-node_modules/
-
-# Environment variables
-.env
-
-# Temp files
-*.py
-*.out
-*.log
+".env" 
