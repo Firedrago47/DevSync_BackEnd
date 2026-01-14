@@ -1,55 +1,57 @@
-const express = require('express');
-const http = require('http');
-const { Server } = require('socket.io');
-const cors = require('cors');
-const { runCode } = require('./runCode');
-const { uploadCode } = require('./aws');
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+const cors = require("cors");
 
-require('dotenv').config();
+require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
 const server = http.createServer(app);
+
 const io = new Server(server, {
   cors: {
-    origin: '*',
-  }
+    origin: process.env.CLIENT_ORIGIN, 
+    methods: ["GET", "POST"],
+  },
 });
 
-const rooms = {};
+const rooms = new Map(); 
 
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+io.on("connection", (socket) => {
+  console.log("Connected:", socket.id);
 
-  socket.on('join-room', ({ roomId }) => {
+  socket.on("room:join", ({ roomId, user }) => {
     socket.join(roomId);
-    if (!rooms[roomId]) rooms[roomId] = '';
-    socket.emit('init-code', rooms[roomId]);
+
+    if (!rooms.has(roomId)) {
+      rooms.set(roomId, { code: "" });
+    }
+
+    socket.to(roomId).emit("presence:join", user);
+    socket.emit("file:init", rooms.get(roomId).code);
   });
 
-  socket.on('code-change', ({ roomId, code }) => {
-    rooms[roomId] = code;
-    socket.to(roomId).emit('code-change', code);
+  socket.on("file:update", ({ roomId, content }) => {
+    if (!rooms.has(roomId)) return;
+
+    rooms.get(roomId).code = content;
+    socket.to(roomId).emit("file:update", content);
   });
 
-  socket.on('language-change', ({ roomId, language }) => {
-    socket.to(roomId).emit('language-change', language);
+  socket.on("cursor:update", ({ roomId, cursor }) => {
+    socket.to(roomId).emit("cursor:update", cursor);
   });
 
-  socket.on('run-code', async ({ code, roomId }) => {
-  const result = await runCode(code); // Python only
-  io.to(roomId).emit('code-output', result);
-
-  try {
-    await uploadCode(roomId, code);
-    console.log(`Code for room ${roomId} uploaded to S3`);
-  } catch (err) {
-    console.error(`Failed to upload code for room ${roomId}:`, err);
-  }
+  socket.on("disconnecting", () => {
+    for (const roomId of socket.rooms) {
+      socket.to(roomId).emit("presence:leave", socket.id);
+    }
+  });
 });
 
-});
-
-server.listen(6969, () => console.log('Backend running on http://localhost:6969'));
+server.listen(process.env.PORT || 6969, () =>
+  console.log("Realtime server running")
+);
