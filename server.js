@@ -29,9 +29,7 @@ const rooms = new Map();
 
 async function loadTree(roomId) {
   try {
-    const raw = await storage.getObject(
-      `rooms/${roomId}/tree.json`
-    );
+    const raw = await storage.getObject(`rooms/${roomId}/tree.json`);
     return JSON.parse(raw);
   } catch {
     return [];
@@ -56,7 +54,6 @@ async function saveFile(roomId, path, content) {
 
 /* Socket.IO */
 
-
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
@@ -67,6 +64,20 @@ io.on("connection", (socket) => {
 
     // Load filesystem snapshot
     const tree = await loadTree(roomId);
+    
+    if (!tree.length) {
+      tree = [
+        {
+          id: "root",
+          name: roomId,
+          type: "root",
+          parentId: null,
+          path: "",
+        },
+      ];
+
+      await saveTree(roomId, tree);
+    }
 
     // Initialize room cache
     if (!rooms.has(roomId)) {
