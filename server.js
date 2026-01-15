@@ -62,14 +62,13 @@ io.on("connection", (socket) => {
   socket.on("room:join", async ({ roomId, user }) => {
     socket.join(roomId);
 
-    // Load filesystem snapshot
-    const tree = await loadTree(roomId);
-    
-    if (!tree.length) {
+    let tree = await loadTree(roomId);
+
+    if (!tree.find((n) => n.type === "root")) {
       tree = [
         {
           id: "root",
-          name: roomId,
+          name: "workspace",
           type: "root",
           parentId: null,
           path: "",
@@ -80,11 +79,7 @@ io.on("connection", (socket) => {
     }
 
     // Initialize room cache
-    if (!rooms.has(roomId)) {
-      rooms.set(roomId, {
-        tree,
-      });
-    }
+    rooms.set(roomId, { tree });
 
     socket.emit("fs:snapshot", tree);
     socket.to(roomId).emit("presence:join", user);
