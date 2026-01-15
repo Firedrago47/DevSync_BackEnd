@@ -13,12 +13,12 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_ORIGIN, 
+    origin: process.env.CLIENT_ORIGIN,
     methods: ["GET", "POST"],
   },
 });
 
-const rooms = new Map(); 
+const rooms = new Map();
 
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
@@ -34,11 +34,13 @@ io.on("connection", (socket) => {
     socket.emit("file:init", rooms.get(roomId).code);
   });
 
-  socket.on("file:update", ({ roomId, content }) => {
-    if (!rooms.has(roomId)) return;
-
-    rooms.get(roomId).code = content;
-    socket.to(roomId).emit("file:update", content);
+  socket.on("file:update", ({ roomId, fileId, content, version, clientId }) => {
+    socket.to(roomId).emit("file:update", {
+      fileId,
+      content,
+      version,
+      clientId,
+    });
   });
 
   socket.on("cursor:update", ({ roomId, cursor }) => {
