@@ -144,8 +144,19 @@ io.on("connection", (socket) => {
 
   /* -------- Cursor Sync -------- */
 
-  socket.on("cursor:update", ({ roomId, cursor }) => {
-    socket.to(roomId).emit("cursor:update", cursor);
+  socket.on("cursor:update", (cursor) => {
+    if (
+      !cursor ||
+      typeof cursor !== "object" ||
+      !cursor.roomId ||
+      !cursor.fileId ||
+      !cursor.clientId ||
+      !cursor.position
+    ) {
+      return;
+    }
+
+    socket.to(cursor.roomId).emit("cursor:update", cursor);
   });
 
   /* -------- Disconnect -------- */
@@ -154,6 +165,10 @@ io.on("connection", (socket) => {
     for (const roomId of socket.rooms) {
       socket.to(roomId).emit("presence:leave", socket.id);
     }
+  });
+
+  socket.on("disconnect", (reason) => {
+    console.log("Disconnected:", socket.id, reason);
   });
 });
 
