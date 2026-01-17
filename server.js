@@ -1,10 +1,18 @@
+/* ===============================
+   server.js — DevSync Realtime Server
+   Protocol-aligned with frontend
+=============================== */
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
+const { randomUUID } = require("crypto");
 require("dotenv").config();
 
 const storage = require("./storage");
+
+/* ---------------- Setup ---------------- */
 
 const app = express();
 app.use(cors());
@@ -20,12 +28,17 @@ const io = new Server(server, {
 });
 
 /**
- * In-memory room cache (authoritative state is S3)
- * Used only for fast access during active sessions
+ * In-memory active room cache
+ * Authoritative persistence = storage (S3)
+ *
+ * rooms = Map<roomId, {
+ *   tree: FSNode[],
+ *   files: Map<fileId, { content, revision }>
+ * }>
  */
 const rooms = new Map();
 
-/* Helpers */
+/* ---------------- Storage helpers ---------------- */
 
 async function loadTree(roomId) {
   try {
@@ -44,6 +57,14 @@ async function saveTree(roomId, tree) {
   );
 }
 
+async function loadFile(roomId, path) {
+  try {
+    return await storage.getObject(`rooms/${roomId}/files/${path}`);
+  } catch {
+    return "";
+  }
+}
+
 async function saveFile(roomId, path, content) {
   await storage.putObject(
     `rooms/${roomId}/files/${path}`,
@@ -52,71 +73,89 @@ async function saveFile(roomId, path, content) {
   );
 }
 
-/* Socket.IO */
+/* ---------------- Utility ---------------- */
+
+function computePath(tree, parentId, name) {
+  if (!parentId) return name;
+  const parent = tree.find((n) => n.id === parentId);
+  return parent ? `${parent.path}/${name}` : name;
+}
+
+function deleteSubtree(tree, id) {
+  const toDelete = new Set([id]);
+
+  for (const node of tree) {
+    if (toDelete.has(node.parentId)) {
+      toDelete.add(node.id);
+    }
+  }
+
+  return tree.filter((n) => !toDelete.has(n.id));
+}
+
+/* ---------------- Socket.IO ---------------- */
 
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
   /* -------- Room Join -------- */
 
-  socket.on("room:join", async ({ roomId, user }) => {
+  socket.on("room:join", async ({ roomId, userId }) => {
     socket.join(roomId);
 
-    let tree = await loadTree(roomId);
-
-    if (!tree.find((n) => n.type === "root")) {
-      tree = [
-        {
-          id: "root",
-          name: "workspace",
-          type: "root",
-          parentId: null,
-          path: "",
-        },
-      ];
-
-      await saveTree(roomId, tree);
+    let room = rooms.get(roomId);
+    if (!room) {
+      const tree = await loadTree(roomId);
+      room = {
+        tree,
+        files: new Map(),
+      };
+      rooms.set(roomId, room);
     }
 
-    // Initialize room cache
-    rooms.set(roomId, { tree });
+    /* --- Send filesystem snapshot --- */
+    socket.emit("fs:snapshot", {
+      roomId,
+      nodes: room.tree,
+    });
 
-    socket.emit("fs:snapshot", tree);
-    socket.to(roomId).emit("presence:join", user);
+    /* --- Send presence snapshot (simple) --- */
+    io.to(roomId).emit("presence:update", {
+      roomId,
+      users: Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
+        (id) => ({
+          userId: id,
+          name: id.slice(0, 6),
+          color: "#4f46e5",
+          online: true,
+          lastSeen: Date.now(),
+        })
+      ),
+    });
   });
 
-  /* -------- Editor Sync -------- */
+  /* -------- Filesystem -------- */
 
-  socket.on(
-    "file:update",
-    async ({ roomId, fileId, content, version, clientId }) => {
-      socket.to(roomId).emit("file:update", {
-        fileId,
-        content,
-        version,
-        clientId,
-      });
-
-      // Persist file
-      const room = rooms.get(roomId);
-      const node = room?.tree.find((n) => n.id === fileId);
-
-      if (node?.path) {
-        await saveFile(roomId, node.path, content);
-      }
-    }
-  );
-
-  /* -------- Filesystem Sync -------- */
-
-  socket.on("fs:create", async ({ roomId, node }) => {
+  socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
     const room = rooms.get(roomId);
     if (!room) return;
+
+    const id = randomUUID();
+    const path = computePath(room.tree, parentId, name);
+
+    const node = {
+      id,
+      name,
+      type,
+      parentId: parentId ?? null,
+      path,
+      updatedAt: Date.now(),
+    };
 
     room.tree.push(node);
     await saveTree(roomId, room.tree);
 
-    socket.to(roomId).emit("fs:create", node);
+    io.to(roomId).emit("fs:create", node);
   });
 
   socket.on("fs:rename", async ({ roomId, id, name }) => {
@@ -127,54 +166,104 @@ io.on("connection", (socket) => {
     if (!node) return;
 
     node.name = name;
-    await saveTree(roomId, room.tree);
+    node.path = computePath(room.tree, node.parentId, name);
+    node.updatedAt = Date.now();
 
-    socket.to(roomId).emit("fs:rename", { id, name });
+    await saveTree(roomId, room.tree);
+    io.to(roomId).emit("fs:rename", node);
   });
 
   socket.on("fs:delete", async ({ roomId, id }) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    room.tree = room.tree.filter((n) => n.id !== id);
+    room.tree = deleteSubtree(room.tree, id);
     await saveTree(roomId, room.tree);
 
-    socket.to(roomId).emit("fs:delete", { id });
+    io.to(roomId).emit("fs:delete", { id });
   });
 
-  /* -------- Cursor Sync -------- */
+  /* -------- Editor -------- */
+
+  socket.on(
+    "file:update",
+    async ({ roomId, fileId, content, baseRevision }) => {
+      const room = rooms.get(roomId);
+      if (!room) return;
+
+      const file =
+        room.files.get(fileId) || { content: "", revision: 0 };
+
+      if (baseRevision !== file.revision) {
+        return; // reject stale update
+      }
+
+      const revision = file.revision + 1;
+      room.files.set(fileId, { content, revision });
+
+      io.to(roomId).emit("file:update", {
+        fileId,
+        content,
+        revision,
+      });
+
+      const node = room.tree.find((n) => n.id === fileId);
+      if (node?.path) {
+        await saveFile(roomId, node.path, content);
+      }
+    }
+  );
+
+  /* -------- Cursor -------- */
 
   socket.on("cursor:update", (cursor) => {
     if (
-      !cursor ||
-      typeof cursor !== "object" ||
-      !cursor.roomId ||
-      !cursor.fileId ||
-      !cursor.clientId ||
-      !cursor.position
+      cursor &&
+      cursor.roomId &&
+      cursor.fileId &&
+      cursor.clientId
     ) {
-      return;
+      socket.to(cursor.roomId).emit("cursor:update", cursor);
     }
+  });
 
-    socket.to(cursor.roomId).emit("cursor:update", cursor);
+  /* -------- Terminal (basic) -------- */
+
+  socket.on("terminal:start", ({ roomId }) => {
+    io.to(roomId).emit("terminal:session", {
+      id: randomUUID(),
+      roomId,
+      status: "running",
+    });
+  });
+
+  socket.on("terminal:stop", ({ roomId }) => {
+    io.to(roomId).emit("terminal:session", {
+      id: randomUUID(),
+      roomId,
+      status: "stopped",
+    });
+  });
+
+  socket.on("terminal:input", ({ roomId, input }) => {
+    io.to(roomId).emit("terminal:log", {
+      id: randomUUID(),
+      timestamp: Date.now(),
+      message: `$ ${input}`,
+      type: "stdout",
+    });
   });
 
   /* -------- Disconnect -------- */
 
-  socket.on("disconnecting", () => {
-    for (const roomId of socket.rooms) {
-      socket.to(roomId).emit("presence:leave", socket.id);
-    }
-  });
-
-  socket.on("disconnect", (reason) => {
-    console.log("Disconnected:", socket.id, reason);
+  socket.on("disconnect", () => {
+    console.log("Disconnected:", socket.id);
   });
 });
 
-/* Start Server */
+/* ---------------- Start ---------------- */
 
 const PORT = process.env.PORT || 6969;
 server.listen(PORT, () => {
-  console.log(`Realtime server running on port ${PORT}`);
+  console.log(`DevSync realtime server running on ${PORT}`);
 });
