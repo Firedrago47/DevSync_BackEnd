@@ -107,29 +107,47 @@ io.on("connection", (socket) => {
 
   /* -------- Room Join -------- */
 
-  socket.on("room:join", async ({ roomId, user }) => {
-    socket.join(roomId);
+  socket.on("room:join", async ({ roomId, userId }) => {
+  socket.join(roomId);
 
-    let room = rooms.get(roomId);
-    if (!room) {
-      room = {
-        tree: await loadTree(roomId),
-        docs: new Map(),
-      };
-      rooms.set(roomId, room);
-    }
+  let room = rooms.get(roomId);
+  if (!room) {
+    room = {
+      tree: await loadTree(roomId),
+      docs: new Map(),
+    };
+    rooms.set(roomId, room);
+  }
 
-    socket.emit("fs:snapshot", {
-      roomId,
-      nodes: room.tree,
-    });
+  // DEV presence stub
+  const user = {
+    userId,
+    name: userId.slice(0, 6),
+    color: "#4f46e5",
+    online: true,
+    lastSeen: Date.now(),
+  };
 
-    socket.to(roomId).emit("presence:join", {
-      userId: user.id,
-      name: user.name,
-      color: user.color,
-    });
+  // Send full snapshot to the joining client
+  socket.emit("presence:update", {
+    roomId,
+    users: [
+      ...Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
+        (sid) => ({
+          userId: sid,
+          name: sid.slice(0, 6),
+          color: "#4f46e5",
+          online: true,
+          lastSeen: Date.now(),
+        })
+      ),
+    ],
   });
+
+  // Notify others
+  socket.to(roomId).emit("presence:join", user);
+});
+
 
   /* -------- Yjs Awareness (Cursors) -------- */
 
