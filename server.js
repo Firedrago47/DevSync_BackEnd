@@ -1,6 +1,6 @@
 /* ===============================
-   server.js — DevSync Realtime Server
-   Protocol-aligned with frontend
+   server.js — DevSync Unified Realtime Server
+   Socket.IO + Yjs (CRDT)
 =============================== */
 
 const express = require("express");
@@ -8,11 +8,15 @@ const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const { randomUUID } = require("crypto");
+const Y = require("yjs");
 require("dotenv").config();
 
 const storage = require("./storage");
 
 /* ---------------- Setup ---------------- */
+
+const awarenessStates = new Map(); 
+
 
 const app = express();
 app.use(cors());
@@ -28,12 +32,9 @@ const io = new Server(server, {
 });
 
 /**
- * In-memory active room cache
- * Authoritative persistence = storage (S3)
- *
  * rooms = Map<roomId, {
  *   tree: FSNode[],
- *   files: Map<fileId, { content, revision }>
+ *   docs: Map<fileId, Y.Doc>
  * }>
  */
 const rooms = new Map();
@@ -57,23 +58,7 @@ async function saveTree(roomId, tree) {
   );
 }
 
-async function loadFile(roomId, path) {
-  try {
-    return await storage.getObject(`rooms/${roomId}/files/${path}`);
-  } catch {
-    return "";
-  }
-}
-
-async function saveFile(roomId, path, content) {
-  await storage.putObject(
-    `rooms/${roomId}/files/${path}`,
-    content,
-    "text/plain"
-  );
-}
-
-/* ---------------- Utility ---------------- */
+/* ---------------- Filesystem utils ---------------- */
 
 function computePath(tree, parentId, name) {
   if (!parentId) return name;
@@ -83,14 +68,36 @@ function computePath(tree, parentId, name) {
 
 function deleteSubtree(tree, id) {
   const toDelete = new Set([id]);
+  let changed = true;
 
-  for (const node of tree) {
-    if (toDelete.has(node.parentId)) {
-      toDelete.add(node.id);
+  while (changed) {
+    changed = false;
+    for (const node of tree) {
+      if (toDelete.has(node.parentId) && !toDelete.has(node.id)) {
+        toDelete.add(node.id);
+        changed = true;
+      }
     }
   }
 
   return tree.filter((n) => !toDelete.has(n.id));
+}
+
+/* ---------------- Yjs helpers ---------------- */
+
+function getYDoc(roomId, fileId) {
+  let room = rooms.get(roomId);
+  if (!room) {
+    room = { tree: [], docs: new Map() };
+    rooms.set(roomId, room);
+  }
+
+  if (!room.docs.has(fileId)) {
+    const doc = new Y.Doc();
+    room.docs.set(fileId, doc);
+  }
+
+  return room.docs.get(fileId);
 }
 
 /* ---------------- Socket.IO ---------------- */
@@ -100,39 +107,69 @@ io.on("connection", (socket) => {
 
   /* -------- Room Join -------- */
 
-  socket.on("room:join", async ({ roomId, userId }) => {
+  socket.on("room:join", async ({ roomId, user }) => {
     socket.join(roomId);
 
     let room = rooms.get(roomId);
     if (!room) {
-      const tree = await loadTree(roomId);
       room = {
-        tree,
-        files: new Map(),
+        tree: await loadTree(roomId),
+        docs: new Map(),
       };
       rooms.set(roomId, room);
     }
 
-    /* --- Send filesystem snapshot --- */
     socket.emit("fs:snapshot", {
       roomId,
       nodes: room.tree,
     });
 
-    /* --- Send presence snapshot (simple) --- */
-    io.to(roomId).emit("presence:update", {
-      roomId,
-      users: Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
-        (id) => ({
-          userId: id,
-          name: id.slice(0, 6),
-          color: "#4f46e5",
-          online: true,
-          lastSeen: Date.now(),
-        })
-      ),
+    socket.to(roomId).emit("presence:join", {
+      userId: user.id,
+      name: user.name,
+      color: user.color,
     });
   });
+
+  /* -------- Yjs Awareness (Cursors) -------- */
+
+socket.on("awareness:update", ({ roomId, fileId, clientId, state }) => {
+  if (!roomId || !fileId || !clientId) return;
+
+  const key = `${roomId}:${fileId}`;
+
+  if (!awarenessStates.has(key)) {
+    awarenessStates.set(key, new Map());
+  }
+
+  const map = awarenessStates.get(key);
+
+  if (state === null) {
+    map.delete(clientId);
+  } else {
+    map.set(clientId, state);
+  }
+
+  socket.to(roomId).emit("awareness:update", {
+    fileId,
+    clientId,
+    state,
+  });
+});
+
+socket.on("disconnect", () => {
+  for (const [key, map] of awarenessStates.entries()) {
+    if (map.delete(socket.id)) {
+      const [roomId, fileId] = key.split(":");
+      socket.to(roomId).emit("awareness:update", {
+        fileId,
+        clientId: socket.id,
+        state: null,
+      });
+    }
+  }
+});
+
 
   /* -------- Filesystem -------- */
 
@@ -183,75 +220,32 @@ io.on("connection", (socket) => {
     io.to(roomId).emit("fs:delete", { id });
   });
 
-  /* -------- Editor -------- */
+  /* -------- Yjs CRDT Editor -------- */
 
-  socket.on(
-    "file:update",
-    async ({ roomId, fileId, content, baseRevision }) => {
-      const room = rooms.get(roomId);
-      if (!room) return;
+  socket.on("yjs:join", ({ roomId, fileId }) => {
+    const doc = getYDoc(roomId, fileId);
 
-      const file =
-        room.files.get(fileId) || { content: "", revision: 0 };
+    // Send full state
+    const update = Y.encodeStateAsUpdate(doc);
+    socket.emit("yjs:sync", { fileId, update });
+  });
 
-      if (baseRevision !== file.revision) {
-        return; // reject stale update
-      }
+  socket.on("yjs:update", ({ roomId, fileId, update }) => {
+    const doc = getYDoc(roomId, fileId);
 
-      const revision = file.revision + 1;
-      room.files.set(fileId, { content, revision });
-
-      io.to(roomId).emit("file:update", {
-        fileId,
-        content,
-        revision,
-      });
-
-      const node = room.tree.find((n) => n.id === fileId);
-      if (node?.path) {
-        await saveFile(roomId, node.path, content);
-      }
-    }
-  );
+    Y.applyUpdate(doc, update);
+    socket.to(roomId).emit("yjs:update", {
+      fileId,
+      update,
+    });
+  });
 
   /* -------- Cursor -------- */
 
   socket.on("cursor:update", (cursor) => {
-    if (
-      cursor &&
-      cursor.roomId &&
-      cursor.fileId &&
-      cursor.clientId
-    ) {
+    if (cursor?.roomId) {
       socket.to(cursor.roomId).emit("cursor:update", cursor);
     }
-  });
-
-  /* -------- Terminal (basic) -------- */
-
-  socket.on("terminal:start", ({ roomId }) => {
-    io.to(roomId).emit("terminal:session", {
-      id: randomUUID(),
-      roomId,
-      status: "running",
-    });
-  });
-
-  socket.on("terminal:stop", ({ roomId }) => {
-    io.to(roomId).emit("terminal:session", {
-      id: randomUUID(),
-      roomId,
-      status: "stopped",
-    });
-  });
-
-  socket.on("terminal:input", ({ roomId, input }) => {
-    io.to(roomId).emit("terminal:log", {
-      id: randomUUID(),
-      timestamp: Date.now(),
-      message: `$ ${input}`,
-      type: "stdout",
-    });
   });
 
   /* -------- Disconnect -------- */
@@ -265,5 +259,5 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 6969;
 server.listen(PORT, () => {
-  console.log(`DevSync realtime server running on ${PORT}`);
+  console.log(`DevSync unified server running on ${PORT}`);
 });
