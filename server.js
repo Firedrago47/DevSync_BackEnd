@@ -1,6 +1,6 @@
 /* ===============================
-   server.js — DevSync Unified Realtime Server
-   Socket.IO + Yjs (CRDT)
+   server.js – DevSync Unified Realtime Server
+   Fixed version with proper Yjs handling
 =============================== */
 
 const express = require("express");
@@ -23,15 +23,17 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: process.env.CLIENT_ORIGIN,
+    origin: process.env.CLIENT_ORIGIN || "http://localhost:3000",
     methods: ["GET", "POST"],
   },
+  transports: ["websocket", "polling"],
 });
 
 /**
  * rooms = Map<roomId, {
  *   tree: FSNode[],
- *   docs: Map<fileId, Y.Doc>
+ *   docs: Map<fileId, Y.Doc>,
+ *   presence: Map<socketId, PresenceData>
  * }>
  */
 const rooms = new Map();
@@ -42,25 +44,55 @@ async function loadTree(roomId) {
   try {
     const raw = await storage.getObject(`rooms/${roomId}/tree.json`);
     return JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    console.log(`No tree found for room ${roomId}, creating new`);
     return [];
   }
 }
 
 async function saveTree(roomId, tree) {
-  await storage.putObject(
-    `rooms/${roomId}/tree.json`,
-    JSON.stringify(tree),
-    "application/json"
-  );
+  try {
+    await storage.putObject(
+      `rooms/${roomId}/tree.json`,
+      JSON.stringify(tree),
+      "application/json"
+    );
+  } catch (err) {
+    console.error(`Failed to save tree for ${roomId}:`, err);
+  }
+}
+
+async function loadYDoc(roomId, fileId) {
+  try {
+    const raw = await storage.getObject(`rooms/${roomId}/files/${fileId}.ydoc`);
+    const buffer = Buffer.from(raw, "base64");
+    return new Uint8Array(buffer);
+  } catch {
+    return null;
+  }
+}
+
+async function saveYDoc(roomId, fileId, doc) {
+  try {
+    const update = Y.encodeStateAsUpdate(doc);
+    const base64 = Buffer.from(update).toString("base64");
+    await storage.putObject(
+      `rooms/${roomId}/files/${fileId}.ydoc`,
+      base64,
+      "application/octet-stream"
+    );
+  } catch (err) {
+    console.error(`Failed to save Yjs doc for ${fileId}:`, err);
+  }
 }
 
 /* ---------------- Filesystem utils ---------------- */
 
 function computePath(tree, parentId, name) {
-  if (!parentId) return name;
+  if (!parentId) return `/${name}`;
   const parent = tree.find((n) => n.id === parentId);
-  return parent ? `${parent.path}/${name}` : name;
+  if (!parent) return `/${name}`;
+  return `${parent.path}/${name}`;
 }
 
 function deleteSubtree(tree, id) {
@@ -82,15 +114,36 @@ function deleteSubtree(tree, id) {
 
 /* ---------------- Yjs helpers ---------------- */
 
-function getYDoc(roomId, fileId) {
+async function getYDoc(roomId, fileId) {
   let room = rooms.get(roomId);
   if (!room) {
-    room = { tree: [], docs: new Map() };
+    room = { 
+      tree: await loadTree(roomId), 
+      docs: new Map(),
+      presence: new Map()
+    };
     rooms.set(roomId, room);
   }
 
   if (!room.docs.has(fileId)) {
-    room.docs.set(fileId, new Y.Doc());
+    const doc = new Y.Doc();
+    
+    // Try to load existing state
+    const savedState = await loadYDoc(roomId, fileId);
+    if (savedState) {
+      Y.applyUpdate(doc, savedState);
+    }
+    
+    room.docs.set(fileId, doc);
+    
+    // Auto-save on changes (debounced)
+    let saveTimeout;
+    doc.on("update", () => {
+      clearTimeout(saveTimeout);
+      saveTimeout = setTimeout(() => {
+        saveYDoc(roomId, fileId, doc);
+      }, 2000);
+    });
   }
 
   return room.docs.get(fileId);
@@ -104,6 +157,8 @@ io.on("connection", (socket) => {
   /* -------- Room Join -------- */
 
   socket.on("room:join", async ({ roomId, userId }) => {
+    console.log(`${socket.id} joining room ${roomId}`);
+    
     socket.join(roomId);
 
     let room = rooms.get(roomId);
@@ -111,39 +166,59 @@ io.on("connection", (socket) => {
       room = {
         tree: await loadTree(roomId),
         docs: new Map(),
+        presence: new Map(),
       };
       rooms.set(roomId, room);
     }
 
-    const users = Array.from(
-      io.sockets.adapter.rooms.get(roomId) || []
-    ).map((sid) => ({
-      userId: sid,
-      name: sid.slice(0, 6),
-      color: "#4f46e5",
+    // Add to presence
+    room.presence.set(socket.id, {
+      userId: userId || socket.id,
+      name: userId?.slice(0, 8) || socket.id.slice(0, 6),
+      color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
       online: true,
       lastSeen: Date.now(),
-    }));
+    });
 
+    // Send file tree snapshot
+    socket.emit("fs:snapshot", {
+      roomId,
+      nodes: room.tree,
+    });
+
+    // Send presence snapshot
+    const users = Array.from(room.presence.values());
     socket.emit("presence:update", {
       roomId,
       users,
     });
 
-    socket.to(roomId).emit("presence:join", {
-      userId,
-      name: userId.slice(0, 6),
-      color: "#4f46e5",
-      online: true,
-      lastSeen: Date.now(),
-    });
+    // Notify others
+    socket.to(roomId).emit("presence:join", room.presence.get(socket.id));
+  });
+
+  socket.on("room:leave", ({ roomId }) => {
+    console.log(`${socket.id} leaving room ${roomId}`);
+    
+    const room = rooms.get(roomId);
+    if (room) {
+      room.presence.delete(socket.id);
+      socket.to(roomId).emit("presence:leave", { userId: socket.id });
+    }
+    
+    socket.leave(roomId);
   });
 
   /* -------- Filesystem -------- */
 
   socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
+    console.log(`Creating ${type} "${name}" in room ${roomId}`);
+    
     const room = rooms.get(roomId);
-    if (!room) return;
+    if (!room) {
+      console.error(`Room ${roomId} not found`);
+      return;
+    }
 
     const id = randomUUID();
     const path = computePath(room.tree, parentId, name);
@@ -152,7 +227,7 @@ io.on("connection", (socket) => {
       id,
       name,
       type,
-      parentId: parentId ?? null,
+      parentId: parentId || null,
       path,
       updatedAt: Date.now(),
     };
@@ -190,24 +265,38 @@ io.on("connection", (socket) => {
 
   /* -------- Yjs CRDT -------- */
 
-  socket.on("yjs:join", ({ roomId, fileId }) => {
-    const doc = getYDoc(roomId, fileId);
+  socket.on("yjs:join", async ({ roomId, fileId }) => {
+    console.log(`${socket.id} joining Yjs doc ${fileId}`);
+    
+    const doc = await getYDoc(roomId, fileId);
     const update = Y.encodeStateAsUpdate(doc);
 
     socket.emit("yjs:sync", {
       fileId,
-      update,
+      update: Array.from(update),
     });
   });
 
-  socket.on("yjs:update", ({ roomId, fileId, update }) => {
-    const doc = getYDoc(roomId, fileId);
+  socket.on("yjs:update", async ({ roomId, fileId, update }) => {
+    const doc = await getYDoc(roomId, fileId);
 
-    Y.applyUpdate(doc, update);
-    socket.to(roomId).emit("yjs:update", {
-      fileId,
-      update,
-    });
+    try {
+      // Convert array back to Uint8Array if needed
+      const updateBytes = 
+        update instanceof Uint8Array 
+          ? update 
+          : new Uint8Array(update);
+
+      Y.applyUpdate(doc, updateBytes);
+
+      // Broadcast to others in room (excluding sender)
+      socket.to(roomId).emit("yjs:update", {
+        fileId,
+        update: Array.from(updateBytes),
+      });
+    } catch (err) {
+      console.error("Error applying Yjs update:", err);
+    }
   });
 
   /* -------- Awareness (RELAY ONLY) -------- */
@@ -220,6 +309,14 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("Disconnected:", socket.id);
+
+    // Remove from all rooms
+    for (const [roomId, room] of rooms.entries()) {
+      if (room.presence.has(socket.id)) {
+        room.presence.delete(socket.id);
+        io.to(roomId).emit("presence:leave", { userId: socket.id });
+      }
+    }
   });
 });
 
@@ -227,5 +324,14 @@ io.on("connection", (socket) => {
 
 const PORT = process.env.PORT || 6969;
 server.listen(PORT, () => {
-  console.log(`DevSync unified server running on ${PORT}`);
+  console.log(`✅ DevSync server running on port ${PORT}`);
+});
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, closing server...");
+  server.close(() => {
+    console.log("Server closed");
+    process.exit(0);
+  });
 });
