@@ -15,9 +15,6 @@ const storage = require("./storage");
 
 /* ---------------- Setup ---------------- */
 
-const awarenessStates = new Map(); 
-
-
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -93,8 +90,7 @@ function getYDoc(roomId, fileId) {
   }
 
   if (!room.docs.has(fileId)) {
-    const doc = new Y.Doc();
-    room.docs.set(fileId, doc);
+    room.docs.set(fileId, new Y.Doc());
   }
 
   return room.docs.get(fileId);
@@ -108,86 +104,40 @@ io.on("connection", (socket) => {
   /* -------- Room Join -------- */
 
   socket.on("room:join", async ({ roomId, userId }) => {
-  socket.join(roomId);
+    socket.join(roomId);
 
-  let room = rooms.get(roomId);
-  if (!room) {
-    room = {
-      tree: await loadTree(roomId),
-      docs: new Map(),
-    };
-    rooms.set(roomId, room);
-  }
-
-  // DEV presence stub
-  const user = {
-    userId,
-    name: userId.slice(0, 6),
-    color: "#4f46e5",
-    online: true,
-    lastSeen: Date.now(),
-  };
-
-  // Send full snapshot to the joining client
-  socket.emit("presence:update", {
-    roomId,
-    users: [
-      ...Array.from(io.sockets.adapter.rooms.get(roomId) || []).map(
-        (sid) => ({
-          userId: sid,
-          name: sid.slice(0, 6),
-          color: "#4f46e5",
-          online: true,
-          lastSeen: Date.now(),
-        })
-      ),
-    ],
-  });
-
-  // Notify others
-  socket.to(roomId).emit("presence:join", user);
-});
-
-
-  /* -------- Yjs Awareness (Cursors) -------- */
-
-socket.on("awareness:update", ({ roomId, fileId, clientId, state }) => {
-  if (!roomId || !fileId || !clientId) return;
-
-  const key = `${roomId}:${fileId}`;
-
-  if (!awarenessStates.has(key)) {
-    awarenessStates.set(key, new Map());
-  }
-
-  const map = awarenessStates.get(key);
-
-  if (state === null) {
-    map.delete(clientId);
-  } else {
-    map.set(clientId, state);
-  }
-
-  socket.to(roomId).emit("awareness:update", {
-    fileId,
-    clientId,
-    state,
-  });
-});
-
-socket.on("disconnect", () => {
-  for (const [key, map] of awarenessStates.entries()) {
-    if (map.delete(socket.id)) {
-      const [roomId, fileId] = key.split(":");
-      socket.to(roomId).emit("awareness:update", {
-        fileId,
-        clientId: socket.id,
-        state: null,
-      });
+    let room = rooms.get(roomId);
+    if (!room) {
+      room = {
+        tree: await loadTree(roomId),
+        docs: new Map(),
+      };
+      rooms.set(roomId, room);
     }
-  }
-});
 
+    const users = Array.from(
+      io.sockets.adapter.rooms.get(roomId) || []
+    ).map((sid) => ({
+      userId: sid,
+      name: sid.slice(0, 6),
+      color: "#4f46e5",
+      online: true,
+      lastSeen: Date.now(),
+    }));
+
+    socket.emit("presence:update", {
+      roomId,
+      users,
+    });
+
+    socket.to(roomId).emit("presence:join", {
+      userId,
+      name: userId.slice(0, 6),
+      color: "#4f46e5",
+      online: true,
+      lastSeen: Date.now(),
+    });
+  });
 
   /* -------- Filesystem -------- */
 
@@ -238,14 +188,16 @@ socket.on("disconnect", () => {
     io.to(roomId).emit("fs:delete", { id });
   });
 
-  /* -------- Yjs CRDT Editor -------- */
+  /* -------- Yjs CRDT -------- */
 
   socket.on("yjs:join", ({ roomId, fileId }) => {
     const doc = getYDoc(roomId, fileId);
-
-    // Send full state
     const update = Y.encodeStateAsUpdate(doc);
-    socket.emit("yjs:sync", { fileId, update });
+
+    socket.emit("yjs:sync", {
+      fileId,
+      update,
+    });
   });
 
   socket.on("yjs:update", ({ roomId, fileId, update }) => {
@@ -258,12 +210,10 @@ socket.on("disconnect", () => {
     });
   });
 
-  /* -------- Cursor -------- */
+  /* -------- Awareness (RELAY ONLY) -------- */
 
-  socket.on("cursor:update", (cursor) => {
-    if (cursor?.roomId) {
-      socket.to(cursor.roomId).emit("cursor:update", cursor);
-    }
+  socket.on("awareness:update", (payload) => {
+    socket.to(payload.roomId).emit("awareness:update", payload);
   });
 
   /* -------- Disconnect -------- */
