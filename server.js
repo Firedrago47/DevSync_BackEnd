@@ -1,6 +1,6 @@
 /* ===============================
    server.js – DevSync Unified Realtime Server
-   Fixed version with proper Yjs handling
+   Improved + Supabase-ready + Memory-safe
 =============================== */
 
 const express = require("express");
@@ -33,7 +33,8 @@ const io = new Server(server, {
  * rooms = Map<roomId, {
  *   tree: FSNode[],
  *   docs: Map<fileId, Y.Doc>,
- *   presence: Map<socketId, PresenceData>
+ *   presence: Map<socketId, PresenceData>,
+ *   lastActive: number
  * }>
  */
 const rooms = new Map();
@@ -44,46 +45,39 @@ async function loadTree(roomId) {
   try {
     const raw = await storage.getObject(`rooms/${roomId}/tree.json`);
     return JSON.parse(raw);
-  } catch (err) {
-    console.log(`No tree found for room ${roomId}, creating new`);
+  } catch {
     return [];
   }
 }
 
 async function saveTree(roomId, tree) {
-  try {
-    await storage.putObject(
-      `rooms/${roomId}/tree.json`,
-      JSON.stringify(tree),
-      "application/json"
-    );
-  } catch (err) {
-    console.error(`Failed to save tree for ${roomId}:`, err);
-  }
+  await storage.putObject(
+    `rooms/${roomId}/tree.json`,
+    JSON.stringify(tree),
+    "application/json"
+  );
 }
 
 async function loadYDoc(roomId, fileId) {
   try {
-    const raw = await storage.getObject(`rooms/${roomId}/files/${fileId}.ydoc`);
-    const buffer = Buffer.from(raw, "base64");
-    return new Uint8Array(buffer);
+    const raw = await storage.getObject(
+      `rooms/${roomId}/files/${fileId}.ydoc`
+    );
+    return new Uint8Array(Buffer.from(raw, "base64"));
   } catch {
     return null;
   }
 }
 
 async function saveYDoc(roomId, fileId, doc) {
-  try {
-    const update = Y.encodeStateAsUpdate(doc);
-    const base64 = Buffer.from(update).toString("base64");
-    await storage.putObject(
-      `rooms/${roomId}/files/${fileId}.ydoc`,
-      base64,
-      "application/octet-stream"
-    );
-  } catch (err) {
-    console.error(`Failed to save Yjs doc for ${fileId}:`, err);
-  }
+  const update = Y.encodeStateAsUpdate(doc);
+  const base64 = Buffer.from(update).toString("base64");
+
+  await storage.putObject(
+    `rooms/${roomId}/files/${fileId}.ydoc`,
+    base64,
+    "application/octet-stream"
+  );
 }
 
 /* ---------------- Filesystem utils ---------------- */
@@ -91,59 +85,61 @@ async function saveYDoc(roomId, fileId, doc) {
 function computePath(tree, parentId, name) {
   if (!parentId) return `/${name}`;
   const parent = tree.find((n) => n.id === parentId);
-  if (!parent) return `/${name}`;
-  return `${parent.path}/${name}`;
+  return parent ? `${parent.path}/${name}` : `/${name}`;
 }
 
-function deleteSubtree(tree, id) {
-  const toDelete = new Set([id]);
+function deleteSubtree(tree, rootId) {
+  const remove = new Set([rootId]);
   let changed = true;
 
   while (changed) {
     changed = false;
     for (const node of tree) {
-      if (toDelete.has(node.parentId) && !toDelete.has(node.id)) {
-        toDelete.add(node.id);
+      if (remove.has(node.parentId) && !remove.has(node.id)) {
+        remove.add(node.id);
         changed = true;
       }
     }
   }
 
-  return tree.filter((n) => !toDelete.has(n.id));
+  return {
+    newTree: tree.filter((n) => !remove.has(n.id)),
+    removedIds: [...remove],
+  };
 }
 
 /* ---------------- Yjs helpers ---------------- */
 
 async function getYDoc(roomId, fileId) {
   let room = rooms.get(roomId);
+
   if (!room) {
-    room = { 
-      tree: await loadTree(roomId), 
+    room = {
+      tree: await loadTree(roomId),
       docs: new Map(),
-      presence: new Map()
+      presence: new Map(),
+      lastActive: Date.now(),
     };
     rooms.set(roomId, room);
   }
 
+  room.lastActive = Date.now();
+
   if (!room.docs.has(fileId)) {
     const doc = new Y.Doc();
-    
-    // Try to load existing state
-    const savedState = await loadYDoc(roomId, fileId);
-    if (savedState) {
-      Y.applyUpdate(doc, savedState);
-    }
-    
-    room.docs.set(fileId, doc);
-    
-    // Auto-save on changes (debounced)
-    let saveTimeout;
+
+    const saved = await loadYDoc(roomId, fileId);
+    if (saved) Y.applyUpdate(doc, saved);
+
+    let debounce;
     doc.on("update", () => {
-      clearTimeout(saveTimeout);
-      saveTimeout = setTimeout(() => {
-        saveYDoc(roomId, fileId, doc);
+      clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        saveYDoc(roomId, fileId, doc).catch(console.error);
       }, 2000);
     });
+
+    room.docs.set(fileId, doc);
   }
 
   return room.docs.get(fileId);
@@ -157,8 +153,6 @@ io.on("connection", (socket) => {
   /* -------- Room Join -------- */
 
   socket.on("room:join", async ({ roomId, userId }) => {
-    console.log(`${socket.id} joining room ${roomId}`);
-    
     socket.join(roomId);
 
     let room = rooms.get(roomId);
@@ -167,11 +161,13 @@ io.on("connection", (socket) => {
         tree: await loadTree(roomId),
         docs: new Map(),
         presence: new Map(),
+        lastActive: Date.now(),
       };
       rooms.set(roomId, room);
     }
 
-    // Add to presence
+    room.lastActive = Date.now();
+
     room.presence.set(socket.id, {
       userId: userId || socket.id,
       name: userId?.slice(0, 8) || socket.id.slice(0, 6),
@@ -180,55 +176,35 @@ io.on("connection", (socket) => {
       lastSeen: Date.now(),
     });
 
-    // Send file tree snapshot
     socket.emit("fs:snapshot", {
       roomId,
       nodes: room.tree,
     });
 
-    // Send presence snapshot
-    const users = Array.from(room.presence.values());
     socket.emit("presence:update", {
       roomId,
-      users,
+      users: [...room.presence.values()],
     });
 
-    // Notify others
-    socket.to(roomId).emit("presence:join", room.presence.get(socket.id));
-  });
-
-  socket.on("room:leave", ({ roomId }) => {
-    console.log(`${socket.id} leaving room ${roomId}`);
-    
-    const room = rooms.get(roomId);
-    if (room) {
-      room.presence.delete(socket.id);
-      socket.to(roomId).emit("presence:leave", { userId: socket.id });
-    }
-    
-    socket.leave(roomId);
+    socket.to(roomId).emit(
+      "presence:join",
+      room.presence.get(socket.id)
+    );
   });
 
   /* -------- Filesystem -------- */
 
   socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
-    console.log(`Creating ${type} "${name}" in room ${roomId}`);
-    
     const room = rooms.get(roomId);
-    if (!room) {
-      console.error(`Room ${roomId} not found`);
-      return;
-    }
+    if (!room) return;
 
     const id = randomUUID();
-    const path = computePath(room.tree, parentId, name);
-
     const node = {
       id,
       name,
       type,
       parentId: parentId || null,
-      path,
+      path: computePath(room.tree, parentId, name),
       updatedAt: Date.now(),
     };
 
@@ -257,49 +233,46 @@ io.on("connection", (socket) => {
     const room = rooms.get(roomId);
     if (!room) return;
 
-    room.tree = deleteSubtree(room.tree, id);
+    const { newTree, removedIds } = deleteSubtree(room.tree, id);
+    room.tree = newTree;
+
     await saveTree(roomId, room.tree);
+
+    for (const fileId of removedIds) {
+      await storage.deleteObject(
+        `rooms/${roomId}/files/${fileId}.ydoc`
+      ).catch(() => {});
+      room.docs.delete(fileId);
+    }
 
     io.to(roomId).emit("fs:delete", { id });
   });
 
-  /* -------- Yjs CRDT -------- */
+  /* -------- Yjs -------- */
 
   socket.on("yjs:join", async ({ roomId, fileId }) => {
-    console.log(`${socket.id} joining Yjs doc ${fileId}`);
-    
     const doc = await getYDoc(roomId, fileId);
-    const update = Y.encodeStateAsUpdate(doc);
-
     socket.emit("yjs:sync", {
       fileId,
-      update: Array.from(update),
+      update: Array.from(Y.encodeStateAsUpdate(doc)),
     });
   });
 
   socket.on("yjs:update", async ({ roomId, fileId, update }) => {
     const doc = await getYDoc(roomId, fileId);
+    const bytes = update instanceof Uint8Array
+      ? update
+      : new Uint8Array(update);
 
-    try {
-      // Convert array back to Uint8Array if needed
-      const updateBytes = 
-        update instanceof Uint8Array 
-          ? update 
-          : new Uint8Array(update);
+    Y.applyUpdate(doc, bytes);
 
-      Y.applyUpdate(doc, updateBytes);
-
-      // Broadcast to others in room (excluding sender)
-      socket.to(roomId).emit("yjs:update", {
-        fileId,
-        update: Array.from(updateBytes),
-      });
-    } catch (err) {
-      console.error("Error applying Yjs update:", err);
-    }
+    socket.to(roomId).emit("yjs:update", {
+      fileId,
+      update: Array.from(bytes),
+    });
   });
 
-  /* -------- Awareness (RELAY ONLY) -------- */
+  /* -------- Awareness (relay only) -------- */
 
   socket.on("awareness:update", (payload) => {
     socket.to(payload.roomId).emit("awareness:update", payload);
@@ -308,30 +281,42 @@ io.on("connection", (socket) => {
   /* -------- Disconnect -------- */
 
   socket.on("disconnect", () => {
-    console.log("Disconnected:", socket.id);
-
-    // Remove from all rooms
     for (const [roomId, room] of rooms.entries()) {
-      if (room.presence.has(socket.id)) {
-        room.presence.delete(socket.id);
-        io.to(roomId).emit("presence:leave", { userId: socket.id });
+      if (room.presence.delete(socket.id)) {
+        io.to(roomId).emit("presence:leave", {
+          userId: socket.id,
+        });
       }
     }
   });
 });
 
+/* ---------------- Room GC (IMPORTANT) ---------------- */
+
+setInterval(() => {
+  const now = Date.now();
+
+  for (const [roomId, room] of rooms.entries()) {
+    if (
+      room.presence.size === 0 &&
+      now - room.lastActive > 1400 * 60 * 1000
+    ) {
+      console.log(`Cleaning room ${roomId}`);
+      rooms.delete(roomId);
+    }
+  }
+}, 60 * 1000);
+
 /* ---------------- Start ---------------- */
 
 const PORT = process.env.PORT || 6969;
 server.listen(PORT, () => {
-  console.log(`✅ DevSync server running on port ${PORT}`);
+  console.log(`DevSync server running on ${PORT}`);
 });
 
-// Graceful shutdown
+/* ---------------- Graceful shutdown ---------------- */
+
 process.on("SIGTERM", () => {
-  console.log("SIGTERM received, closing server...");
-  server.close(() => {
-    console.log("Server closed");
-    process.exit(0);
-  });
+  console.log("SIGTERM received");
+  server.close(() => process.exit(0));
 });
