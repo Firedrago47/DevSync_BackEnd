@@ -13,7 +13,6 @@ require("dotenv").config();
 
 const storage = require("./storage");
 const roomService = require("./storage/room.service");
-const roomMeta = await roomService.getRoomWithMembers(roomId);
 
 /* ---------------- Setup ---------------- */
 
@@ -126,7 +125,7 @@ async function getYDoc(roomId, fileId) {
 
   if (!room.docs.has(fileId)) {
     const doc = new Y.Doc();
-
+    
     const saved = await loadYDoc(roomId, fileId);
     if (saved) Y.applyUpdate(doc, saved);
 
@@ -194,6 +193,8 @@ io.on("connection", (socket) => {
 
   socket.on("room:join", async ({ roomId, userId }) => {
     const member = await roomService.isMember(roomId, userId);
+    const roomMeta = await roomService.getRoomWithMembers(roomId);
+    
     if (!member) {
       socket.emit("room:error", {
         message: "Unauthorized",
