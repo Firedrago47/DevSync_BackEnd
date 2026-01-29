@@ -145,6 +145,30 @@ async function getYDoc(roomId, fileId) {
   return room.docs.get(fileId);
 }
 
+/* ---------- REST: Get room metadata ---------- */
+
+app.get("/api/rooms/:roomId", async (req, res) => {
+  const { roomId } = req.params;
+
+  try {
+    const room = await roomService.getRoomWithMembers(roomId);
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
+    return res.json({
+      id: room.id,
+      name: room.name,
+      ownerId: room.ownerId,
+      members: room.members,
+    });
+  } catch (err) {
+    console.error("Failed to fetch room:", err);
+    res.status(500).json({ error: "Internal error" });
+  }
+});
+
+
 /* ---------------- Socket.IO ---------------- */
 
 io.on("connection", (socket) => {
