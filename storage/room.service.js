@@ -1,4 +1,4 @@
-const supabase = require("./supabase.provider");
+const supabase = require("./supabase.db");
 
 /* ---------- Create room ---------- */
 async function createRoom({ name, ownerId }) {
@@ -64,8 +64,8 @@ async function isMember(roomId, userId) {
     .eq("room_id", roomId)
     .eq("user_id", userId)
     .single();
-
-  return data ?? null;
+  if(error) return null;
+  return data;
 }
 
 module.exports = {
