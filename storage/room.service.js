@@ -1,3 +1,4 @@
+const crypto = require("crypto");
 const supabase = require("./supabase.db");
 
 /* ---------- Create room ---------- */
@@ -43,7 +44,10 @@ async function getRoomWithMembers(roomId) {
     .eq("id", roomId)
     .single();
 
-  if (error) return null;
+  if (error) {
+    console.error("getRoomWithMembers error:", error);
+    return null;
+  }
 
   return {
     id: data.id,
@@ -58,14 +62,19 @@ async function getRoomWithMembers(roomId) {
 
 /* ---------- Check membership ---------- */
 async function isMember(roomId, userId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("room_members")
     .select("role")
     .eq("room_id", roomId)
     .eq("user_id", userId)
-    .single();
-  if(error) return null;
-  return data;
+    .maybeSingle(); 
+
+  if (error) {
+    console.error("isMember error:", error);
+    return null;
+  }
+
+  return data; // { role } | null
 }
 
 module.exports = {
