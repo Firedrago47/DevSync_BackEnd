@@ -12,6 +12,9 @@ const Y = require("yjs");
 require("dotenv").config();
 
 const storage = require("./storage");
+const roomService = require("./storage/room.service");
+
+
 
 /* ---------------- Setup ---------------- */
 
@@ -150,69 +153,99 @@ async function getYDoc(roomId, fileId) {
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
-  /* -------- Room Join -------- */
-
-  socket.on("room:join", async ({ roomId, userId }) => {
-    socket.join(roomId);
-
-    let room = rooms.get(roomId);
-    if (!room) {
-      room = {
-        tree: await loadTree(roomId),
-        docs: new Map(),
-        presence: new Map(),
-        lastActive: Date.now(),
-      };
-      rooms.set(roomId, room);
-    }
-
-    room.lastActive = Date.now();
-
-    room.presence.set(socket.id, {
-      userId: userId || socket.id,
-      name: userId?.slice(0, 8) || socket.id.slice(0, 6),
-      color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
-      online: true,
-      lastSeen: Date.now(),
+  socket.on("room:create", async ({ name, userId }) => {
+  try {
+    const { roomId } = await roomService.createRoom({
+      name,
+      ownerId: userId,
     });
 
-    socket.emit("fs:snapshot", {
-      roomId,
-      nodes: room.tree,
-    });
+    socket.emit("room:created", { roomId });
+  } catch (err) {
+    socket.emit("error", { message: "Room creation failed" });
+  }
+});
 
-    socket.emit("presence:update", {
-      roomId,
-      users: [...room.presence.values()],
+socket.on("room:join", async ({ roomId, userId }) => {
+  /* ---------- Validate membership ---------- */
+  const member = await roomService.isMember(roomId, userId);
+  if (!member) {
+    socket.emit("room:error", {
+      message: "You are not a member of this room",
     });
+    return;
+  }
 
-    socket.to(roomId).emit(
-      "presence:join",
-      room.presence.get(socket.id)
-    );
+  socket.join(roomId);
+
+  /* ---------- Hydrate room ---------- */
+  let room = rooms.get(roomId);
+  if (!room) {
+    room = {
+      tree: await loadTree(roomId),
+      docs: new Map(),
+      presence: new Map(),
+      lastActive: Date.now(),
+    };
+    rooms.set(roomId, room);
+  }
+
+  room.lastActive = Date.now();
+
+  /* ---------- Presence ---------- */
+  room.presence.set(socket.id, {
+    userId,
+    name: userId.slice(0, 8),
+    color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
+    online: true,
+    lastSeen: Date.now(),
   });
+
+  /* ---------- Send authoritative snapshot ---------- */
+  socket.emit("room:snapshot", {
+    roomId,
+    tree: room.tree,
+  });
+
+  socket.emit("presence:update", {
+    roomId,
+    users: [...room.presence.values()],
+  });
+
+  socket.to(roomId).emit(
+    "presence:join",
+    room.presence.get(socket.id)
+  );
+});
+
 
   /* -------- Filesystem -------- */
 
-  socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
-    const room = rooms.get(roomId);
-    if (!room) return;
+socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
+  const member = await roomService.isMember(roomId, socket.userId);
+  if (!member || member.role === "viewer") return;
 
-    const id = randomUUID();
-    const node = {
-      id,
-      name,
-      type,
-      parentId: parentId || null,
-      path: computePath(room.tree, parentId, name),
-      updatedAt: Date.now(),
-    };
+  const room = rooms.get(roomId);
+  if (!room) return;
 
-    room.tree.push(node);
-    await saveTree(roomId, room.tree);
+  const id = randomUUID();
+  const path = computePath(room.tree, parentId, name);
 
-    io.to(roomId).emit("fs:create", node);
-  });
+  const node = {
+    id,
+    name,
+    type,
+    parentId: parentId || null,
+    path,
+    updatedAt: Date.now(),
+  };
+
+  room.tree.push(node);
+  await saveTree(roomId, room.tree);
+
+  io.to(roomId).emit("fs:create", node);
+});
+
 
   socket.on("fs:rename", async ({ roomId, id, name }) => {
     const room = rooms.get(roomId);
