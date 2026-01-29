@@ -13,6 +13,7 @@ require("dotenv").config();
 
 const storage = require("./storage");
 const roomService = require("./storage/room.service");
+const roomMeta = await roomService.getRoomWithMembers(roomId);
 
 /* ---------------- Setup ---------------- */
 
@@ -43,9 +44,7 @@ const rooms = new Map();
 
 async function loadTree(roomId) {
   try {
-    const buffer = await storage.getObject(
-      `rooms/${roomId}/tree.json`
-    );
+    const buffer = await storage.getObject(`rooms/${roomId}/tree.json`);
     return JSON.parse(buffer.toString("utf-8"));
   } catch {
     return [];
@@ -56,14 +55,14 @@ async function saveTree(roomId, tree) {
   await storage.putObject(
     `rooms/${roomId}/tree.json`,
     Buffer.from(JSON.stringify(tree)),
-    "application/json"
+    "application/json",
   );
 }
 
 async function loadYDoc(roomId, fileId) {
   try {
     const buffer = await storage.getObject(
-      `rooms/${roomId}/files/${fileId}.ydoc`
+      `rooms/${roomId}/files/${fileId}.ydoc`,
     );
     return new Uint8Array(buffer);
   } catch {
@@ -76,7 +75,7 @@ async function saveYDoc(roomId, fileId, doc) {
   await storage.putObject(
     `rooms/${roomId}/files/${fileId}.ydoc`,
     Buffer.from(update),
-    "application/octet-stream"
+    "application/octet-stream",
   );
 }
 
@@ -168,7 +167,6 @@ app.get("/api/rooms/:roomId", async (req, res) => {
   }
 });
 
-
 /* ---------------- Socket.IO ---------------- */
 
 io.on("connection", (socket) => {
@@ -184,7 +182,7 @@ io.on("connection", (socket) => {
       });
 
       socket.emit("room:created", { roomId });
-    } catch (err){
+    } catch (err) {
       console.error("Room creation failed:", err);
       socket.emit("room:error", {
         message: "Room creation failed",
@@ -229,6 +227,12 @@ io.on("connection", (socket) => {
 
     socket.emit("room:snapshot", {
       roomId,
+      room: {
+        id: roomMeta.id,
+        name: roomMeta.name,
+        ownerId: roomMeta.ownerId,
+      },
+      members: roomMeta.members,
       tree: room.tree,
     });
 
@@ -242,19 +246,26 @@ io.on("connection", (socket) => {
       users: [...room.presence.values()],
     });
 
-    socket.to(roomId).emit(
-      "presence:join",
-      room.presence.get(socket.id)
-    );
+    socket.to(roomId).emit("presence:join", room.presence.get(socket.id));
   });
+
+  socket.on("room:leave", ({ roomId }) => {
+  socket.leave(roomId);
+
+  const room = rooms.get(roomId);
+  if (!room) return;
+
+  room.presence.delete(socket.id);
+  io.to(roomId).emit("presence:leave", {
+    userId: socket.userId,
+  });
+});
+
 
   /* -------- Filesystem -------- */
 
   socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
-    const member = await roomService.isMember(
-      roomId,
-      socket.userId
-    );
+    const member = await roomService.isMember(roomId, socket.userId);
     if (!member || member.role === "viewer") return;
 
     const room = rooms.get(roomId);
@@ -276,10 +287,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("fs:rename", async ({ roomId, id, name }) => {
-    const member = await roomService.isMember(
-      roomId,
-      socket.userId
-    );
+    const member = await roomService.isMember(roomId, socket.userId);
     if (!member || member.role === "viewer") return;
 
     const room = rooms.get(roomId);
@@ -297,28 +305,20 @@ io.on("connection", (socket) => {
   });
 
   socket.on("fs:delete", async ({ roomId, id }) => {
-    const member = await roomService.isMember(
-      roomId,
-      socket.userId
-    );
+    const member = await roomService.isMember(roomId, socket.userId);
     if (!member || member.role === "viewer") return;
 
     const room = rooms.get(roomId);
     if (!room) return;
 
-    const { newTree, removedIds } = deleteSubtree(
-      room.tree,
-      id
-    );
+    const { newTree, removedIds } = deleteSubtree(room.tree, id);
     room.tree = newTree;
 
     await saveTree(roomId, room.tree);
 
     for (const fileId of removedIds) {
       await storage
-        .deleteObject(
-          `rooms/${roomId}/files/${fileId}.ydoc`
-        )
+        .deleteObject(`rooms/${roomId}/files/${fileId}.ydoc`)
         .catch(() => {});
       room.docs.delete(fileId);
     }
@@ -339,9 +339,7 @@ io.on("connection", (socket) => {
   socket.on("yjs:update", async ({ roomId, fileId, update }) => {
     const doc = await getYDoc(roomId, fileId);
     const bytes =
-      update instanceof Uint8Array
-        ? update
-        : new Uint8Array(update);
+      update instanceof Uint8Array ? update : new Uint8Array(update);
 
     Y.applyUpdate(doc, bytes);
 
@@ -354,9 +352,7 @@ io.on("connection", (socket) => {
   /* -------- Awareness -------- */
 
   socket.on("awareness:update", (payload) => {
-    socket
-      .to(payload.roomId)
-      .emit("awareness:update", payload);
+    socket.to(payload.roomId).emit("awareness:update", payload);
   });
 
   /* -------- Disconnect -------- */
@@ -380,10 +376,7 @@ setInterval(() => {
   const now = Date.now();
 
   for (const [roomId, room] of rooms.entries()) {
-    if (
-      room.presence.size === 0 &&
-      now - room.lastActive > 30 * 60 * 1000
-    ) {
+    if (room.presence.size === 0 && now - room.lastActive > 30 * 60 * 1000) {
       rooms.delete(roomId);
       console.log("GC room", roomId);
     }
