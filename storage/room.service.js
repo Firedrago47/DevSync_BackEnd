@@ -1,4 +1,4 @@
-const supabase = require("./supabase");
+const supabase = require("./supabase.provider");
 
 /* ---------- Create room ---------- */
 async function createRoom({ name, ownerId }) {
