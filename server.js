@@ -160,7 +160,8 @@ io.on("connection", (socket) => {
       });
 
       socket.emit("room:created", { roomId });
-    } catch {
+    } catch (err){
+      console.error("Room creation failed:", err);
       socket.emit("room:error", {
         message: "Room creation failed",
       });
