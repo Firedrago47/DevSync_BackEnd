@@ -1,6 +1,6 @@
 /* ===============================
    server.js – DevSync Unified Realtime Server
-   Improved + Supabase-ready + Memory-safe
+   Production-correct + Supabase-ready
 =============================== */
 
 const express = require("express");
@@ -13,8 +13,6 @@ require("dotenv").config();
 
 const storage = require("./storage");
 const roomService = require("./storage/room.service");
-
-
 
 /* ---------------- Setup ---------------- */
 
@@ -29,7 +27,6 @@ const io = new Server(server, {
     origin: process.env.CLIENT_ORIGIN || "http://localhost:3000",
     methods: ["GET", "POST"],
   },
-  transports: ["websocket", "polling"],
 });
 
 /**
@@ -46,8 +43,10 @@ const rooms = new Map();
 
 async function loadTree(roomId) {
   try {
-    const raw = await storage.getObject(`rooms/${roomId}/tree.json`);
-    return JSON.parse(raw);
+    const buffer = await storage.getObject(
+      `rooms/${roomId}/tree.json`
+    );
+    return JSON.parse(buffer.toString("utf-8"));
   } catch {
     return [];
   }
@@ -56,17 +55,17 @@ async function loadTree(roomId) {
 async function saveTree(roomId, tree) {
   await storage.putObject(
     `rooms/${roomId}/tree.json`,
-    JSON.stringify(tree),
+    Buffer.from(JSON.stringify(tree)),
     "application/json"
   );
 }
 
 async function loadYDoc(roomId, fileId) {
   try {
-    const raw = await storage.getObject(
+    const buffer = await storage.getObject(
       `rooms/${roomId}/files/${fileId}.ydoc`
     );
-    return new Uint8Array(Buffer.from(raw, "base64"));
+    return new Uint8Array(buffer);
   } catch {
     return null;
   }
@@ -74,16 +73,14 @@ async function loadYDoc(roomId, fileId) {
 
 async function saveYDoc(roomId, fileId, doc) {
   const update = Y.encodeStateAsUpdate(doc);
-  const base64 = Buffer.from(update).toString("base64");
-
   await storage.putObject(
     `rooms/${roomId}/files/${fileId}.ydoc`,
-    base64,
+    Buffer.from(update),
     "application/octet-stream"
   );
 }
 
-/* ---------------- Filesystem utils ---------------- */
+/* ---------------- FS helpers ---------------- */
 
 function computePath(tree, parentId, name) {
   if (!parentId) return `/${name}`;
@@ -111,7 +108,7 @@ function deleteSubtree(tree, rootId) {
   };
 }
 
-/* ---------------- Yjs helpers ---------------- */
+/* ---------------- Yjs ---------------- */
 
 async function getYDoc(roomId, fileId) {
   let room = rooms.get(roomId);
@@ -153,101 +150,113 @@ async function getYDoc(roomId, fileId) {
 io.on("connection", (socket) => {
   console.log("Connected:", socket.id);
 
+  /* -------- Room create -------- */
+
   socket.on("room:create", async ({ name, userId }) => {
-  try {
-    const { roomId } = await roomService.createRoom({
-      name,
-      ownerId: userId,
+    try {
+      const { roomId } = await roomService.createRoom({
+        name,
+        ownerId: userId,
+      });
+
+      socket.emit("room:created", { roomId });
+    } catch {
+      socket.emit("room:error", {
+        message: "Room creation failed",
+      });
+    }
+  });
+
+  /* -------- Room join -------- */
+
+  socket.on("room:join", async ({ roomId, userId }) => {
+    const member = await roomService.isMember(roomId, userId);
+    if (!member) {
+      socket.emit("room:error", {
+        message: "Unauthorized",
+      });
+      return;
+    }
+
+    socket.userId = userId;
+    socket.join(roomId);
+
+    let room = rooms.get(roomId);
+    if (!room) {
+      room = {
+        tree: await loadTree(roomId),
+        docs: new Map(),
+        presence: new Map(),
+        lastActive: Date.now(),
+      };
+      rooms.set(roomId, room);
+    }
+
+    room.lastActive = Date.now();
+
+    room.presence.set(socket.id, {
+      userId,
+      name: userId.slice(0, 8),
+      color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
+      online: true,
+      lastSeen: Date.now(),
     });
 
-    socket.emit("room:created", { roomId });
-  } catch (err) {
-    socket.emit("error", { message: "Room creation failed" });
-  }
-});
-
-socket.on("room:join", async ({ roomId, userId }) => {
-  /* ---------- Validate membership ---------- */
-  const member = await roomService.isMember(roomId, userId);
-  if (!member) {
-    socket.emit("room:error", {
-      message: "You are not a member of this room",
+    socket.emit("room:snapshot", {
+      roomId,
+      tree: room.tree,
     });
-    return;
-  }
 
-  socket.join(roomId);
+    socket.emit("fs:snapshot", {
+      roomId,
+      nodes: room.tree,
+    });
 
-  /* ---------- Hydrate room ---------- */
-  let room = rooms.get(roomId);
-  if (!room) {
-    room = {
-      tree: await loadTree(roomId),
-      docs: new Map(),
-      presence: new Map(),
-      lastActive: Date.now(),
-    };
-    rooms.set(roomId, room);
-  }
+    socket.emit("presence:update", {
+      roomId,
+      users: [...room.presence.values()],
+    });
 
-  room.lastActive = Date.now();
-
-  /* ---------- Presence ---------- */
-  room.presence.set(socket.id, {
-    userId,
-    name: userId.slice(0, 8),
-    color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
-    online: true,
-    lastSeen: Date.now(),
+    socket.to(roomId).emit(
+      "presence:join",
+      room.presence.get(socket.id)
+    );
   });
-
-  /* ---------- Send authoritative snapshot ---------- */
-  socket.emit("room:snapshot", {
-    roomId,
-    tree: room.tree,
-  });
-
-  socket.emit("presence:update", {
-    roomId,
-    users: [...room.presence.values()],
-  });
-
-  socket.to(roomId).emit(
-    "presence:join",
-    room.presence.get(socket.id)
-  );
-});
-
 
   /* -------- Filesystem -------- */
 
-socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
-  const member = await roomService.isMember(roomId, socket.userId);
-  if (!member || member.role === "viewer") return;
+  socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
+    const member = await roomService.isMember(
+      roomId,
+      socket.userId
+    );
+    if (!member || member.role === "viewer") return;
 
-  const room = rooms.get(roomId);
-  if (!room) return;
+    const room = rooms.get(roomId);
+    if (!room) return;
 
-  const id = randomUUID();
-  const path = computePath(room.tree, parentId, name);
+    const node = {
+      id: randomUUID(),
+      name,
+      type,
+      parentId: parentId ?? null,
+      path: computePath(room.tree, parentId, name),
+      updatedAt: Date.now(),
+    };
 
-  const node = {
-    id,
-    name,
-    type,
-    parentId: parentId || null,
-    path,
-    updatedAt: Date.now(),
-  };
+    room.tree.push(node);
+    await saveTree(roomId, room.tree);
 
-  room.tree.push(node);
-  await saveTree(roomId, room.tree);
-
-  io.to(roomId).emit("fs:create", node);
-});
-
+    io.to(roomId).emit("fs:create", node);
+  });
 
   socket.on("fs:rename", async ({ roomId, id, name }) => {
+    const member = await roomService.isMember(
+      roomId,
+      socket.userId
+    );
+    if (!member || member.role === "viewer") return;
+
     const room = rooms.get(roomId);
     if (!room) return;
 
@@ -263,18 +272,29 @@ socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
   });
 
   socket.on("fs:delete", async ({ roomId, id }) => {
+    const member = await roomService.isMember(
+      roomId,
+      socket.userId
+    );
+    if (!member || member.role === "viewer") return;
+
     const room = rooms.get(roomId);
     if (!room) return;
 
-    const { newTree, removedIds } = deleteSubtree(room.tree, id);
+    const { newTree, removedIds } = deleteSubtree(
+      room.tree,
+      id
+    );
     room.tree = newTree;
 
     await saveTree(roomId, room.tree);
 
     for (const fileId of removedIds) {
-      await storage.deleteObject(
-        `rooms/${roomId}/files/${fileId}.ydoc`
-      ).catch(() => {});
+      await storage
+        .deleteObject(
+          `rooms/${roomId}/files/${fileId}.ydoc`
+        )
+        .catch(() => {});
       room.docs.delete(fileId);
     }
 
@@ -293,9 +313,10 @@ socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
 
   socket.on("yjs:update", async ({ roomId, fileId, update }) => {
     const doc = await getYDoc(roomId, fileId);
-    const bytes = update instanceof Uint8Array
-      ? update
-      : new Uint8Array(update);
+    const bytes =
+      update instanceof Uint8Array
+        ? update
+        : new Uint8Array(update);
 
     Y.applyUpdate(doc, bytes);
 
@@ -305,26 +326,30 @@ socket.on("fs:create", async ({ roomId, parentId, name, type }) => {
     });
   });
 
-  /* -------- Awareness (relay only) -------- */
+  /* -------- Awareness -------- */
 
   socket.on("awareness:update", (payload) => {
-    socket.to(payload.roomId).emit("awareness:update", payload);
+    socket
+      .to(payload.roomId)
+      .emit("awareness:update", payload);
   });
 
   /* -------- Disconnect -------- */
 
   socket.on("disconnect", () => {
     for (const [roomId, room] of rooms.entries()) {
-      if (room.presence.delete(socket.id)) {
+      const presence = room.presence.get(socket.id);
+      if (presence) {
+        room.presence.delete(socket.id);
         io.to(roomId).emit("presence:leave", {
-          userId: socket.id,
+          userId: presence.userId,
         });
       }
     }
   });
 });
 
-/* ---------------- Room GC (IMPORTANT) ---------------- */
+/* ---------------- Room GC ---------------- */
 
 setInterval(() => {
   const now = Date.now();
@@ -332,10 +357,10 @@ setInterval(() => {
   for (const [roomId, room] of rooms.entries()) {
     if (
       room.presence.size === 0 &&
-      now - room.lastActive > 1400 * 60 * 1000
+      now - room.lastActive > 30 * 60 * 1000
     ) {
-      console.log(`Cleaning room ${roomId}`);
       rooms.delete(roomId);
+      console.log("GC room", roomId);
     }
   }
 }, 60 * 1000);
@@ -344,10 +369,10 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 6969;
 server.listen(PORT, () => {
-  console.log(`DevSync server running on ${PORT}`);
+  console.log(`✅ DevSync server running on ${PORT}`);
 });
 
-/* ---------------- Graceful shutdown ---------------- */
+/* ---------------- Shutdown ---------------- */
 
 process.on("SIGTERM", () => {
   console.log("SIGTERM received");

@@ -1,28 +1,57 @@
 const { createClient } = require("@supabase/supabase-js");
 
+/* ---------- Env validation ---------- */
+if (!process.env.SUPABASE_URL) {
+  throw new Error("SUPABASE_URL is not set");
+}
+
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  throw new Error("SUPABASE_SERVICE_ROLE_KEY is not set");
+}
+
+if (!process.env.SUPABASE_BUCKET) {
+  throw new Error("SUPABASE_BUCKET is not set");
+}
+
+/* ---------- Client ---------- */
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY 
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 const BUCKET = process.env.SUPABASE_BUCKET;
 
-/**
- * PUT object
- */
-async function putObject(key, body, contentType = "application/json") {
-  const { error } = await supabase.storage
-    .from(BUCKET)
-    .upload(key, body, {
-      contentType,
-      upsert: true, // overwrite if exists
-    });
+/* ---------- Helpers ---------- */
 
-  if (error) throw error;
+/**
+ * PUT object (create or overwrite)
+ */
+async function putObject(
+  key,
+  body,
+  contentType = "application/octet-stream"
+) {
+  // Try update first (overwrite)
+  const { error: updateErr } = await supabase.storage
+    .from(BUCKET)
+    .update(key, body, { contentType });
+
+  // If file does not exist, upload
+  if (updateErr) {
+    const { error: uploadErr } = await supabase.storage
+      .from(BUCKET)
+      .upload(key, body, {
+        contentType,
+        upsert: false,
+      });
+
+    if (uploadErr) throw uploadErr;
+  }
 }
 
 /**
  * GET object
+ * Returns Buffer (NOT string)
  */
 async function getObject(key) {
   const { data, error } = await supabase.storage
@@ -31,8 +60,7 @@ async function getObject(key) {
 
   if (error) throw error;
 
-  const buffer = Buffer.from(await data.arrayBuffer());
-  return buffer.toString("utf-8");
+  return Buffer.from(await data.arrayBuffer());
 }
 
 /**
