@@ -1,9 +1,38 @@
 const crypto = require("crypto");
-const supabase = require("./supabase.db");
+
+const DEV_MODE = process.env.DEV_MODE === "true";
+
+let supabase = null;
+if (!DEV_MODE) {
+  supabase = require("./supabase.db");
+}
+
+const devRooms = new Map();
+const devMembers = new Map();
+
+function getMemberKey(roomId, userId) {
+  return `${roomId}:${userId}`;
+}
 
 /* ---------- Create room ---------- */
 async function createRoom({ name, ownerId }) {
   const roomId = crypto.randomUUID();
+
+  if (DEV_MODE) {
+    devRooms.set(roomId, {
+      id: roomId,
+      name,
+      ownerId,
+    });
+
+    devMembers.set(getMemberKey(roomId, ownerId), {
+      roomId,
+      userId: ownerId,
+      role: "owner",
+    });
+
+    return { roomId };
+  }
 
   const { error: roomErr } = await supabase
     .from("rooms")
@@ -30,6 +59,27 @@ async function createRoom({ name, ownerId }) {
 
 /* ---------- Get room + members ---------- */
 async function getRoomWithMembers(roomId) {
+  if (DEV_MODE) {
+    const room = devRooms.get(roomId);
+    if (!room) return null;
+
+    const members = [];
+    for (const member of devMembers.values()) {
+      if (member.roomId !== roomId) continue;
+      members.push({
+        userId: member.userId,
+        role: member.role,
+      });
+    }
+
+    return {
+      id: room.id,
+      name: room.name,
+      ownerId: room.ownerId,
+      members,
+    };
+  }
+
   const { data, error } = await supabase
     .from("rooms")
     .select(`
@@ -62,6 +112,25 @@ async function getRoomWithMembers(roomId) {
 
 /* ---------- Check membership ---------- */
 async function isMember(roomId, userId) {
+  if (DEV_MODE) {
+    const room = devRooms.get(roomId);
+    if (!room) return null;
+
+    const key = getMemberKey(roomId, userId);
+    const existing = devMembers.get(key);
+    if (existing) {
+      return { role: existing.role };
+    }
+
+    const autoAdded = {
+      roomId,
+      userId,
+      role: "editor",
+    };
+    devMembers.set(key, autoAdded);
+    return { role: autoAdded.role };
+  }
+
   const { data, error } = await supabase
     .from("room_members")
     .select("role")
