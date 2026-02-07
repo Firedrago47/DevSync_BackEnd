@@ -6,10 +6,16 @@ const registerPresenceHandlers = require("./presence.handlers");
 const { startRoomGC } = require("./state");
 
 function initSocket(server) {
-  const io = new Server(server, {
+  const allowedOrigins = [
+    "https://devsync-teal.vercel.app",
+    "http://localhost:3000",
+  ];
+
+  const io = new Server(httpServer, {
     cors: {
-      origin: process.env.CLIENT_ORIGIN || "http://localhost:3000",
+      origin: allowedOrigins,
       methods: ["GET", "POST"],
+      credentials: true,
     },
   });
 
