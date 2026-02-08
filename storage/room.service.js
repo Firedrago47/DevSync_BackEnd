@@ -154,11 +154,16 @@ async function upsertPendingJoinRequest({
     userId,
     name: name || userId,
     email: email || null,
-    requestedAt: requestedAt || new Date().toISOString(),
+    requestedAt:
+      typeof requestedAt === "number" ? requestedAt : Date.now(),
   };
 
   pendingJoinRequests.set(getPendingKey(roomId, userId), payload);
   return payload;
+}
+
+async function getPendingJoinRequest(roomId, userId) {
+  return pendingJoinRequests.get(getPendingKey(roomId, userId)) || null;
 }
 
 async function clearPendingJoinRequest(roomId, userId) {
@@ -196,6 +201,7 @@ module.exports = {
   getRoomWithMembers,
   isMember,
   upsertPendingJoinRequest,
+  getPendingJoinRequest,
   clearPendingJoinRequest,
   assignRole,
 };

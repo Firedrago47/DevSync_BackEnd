@@ -30,6 +30,39 @@ async function emitRoomSnapshot(socket, roomId) {
   });
 }
 
+function buildPresenceUser(userId, name) {
+  return {
+    userId,
+    name: name || userId.slice(0, 8),
+    color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
+    online: true,
+    lastSeen: Date.now(),
+  };
+}
+
+async function finalizeRoomJoin(socket, roomId, userId, name) {
+  socket.userId = userId;
+  socket.join(roomId);
+  await roomService.clearPendingJoinRequest(roomId, userId);
+
+  const room = await getRoom(roomId);
+  room.presence.set(socket.id, buildPresenceUser(userId, name));
+
+  await emitRoomSnapshot(socket, roomId);
+
+  socket.emit("fs:snapshot", {
+    roomId,
+    nodes: room.tree,
+  });
+
+  socket.emit("presence:update", {
+    roomId,
+    users: [...room.presence.values()],
+  });
+
+  socket.to(roomId).emit("presence:join", room.presence.get(socket.id));
+}
+
 function registerRoomHandlers(io, socket) {
   socket.on("room:create", async ({ name, userId }) => {
     try {
@@ -53,7 +86,8 @@ function registerRoomHandlers(io, socket) {
       const roomMeta = await roomService.getRoomWithMembers(roomId);
       if (!roomMeta) {
         socket.emit("room:error", {
-          code: "ROOM_NOT_FOUND",
+          roomId,
+          code: "room_not_found",
           message: "Room not found",
         });
         return;
@@ -68,7 +102,7 @@ function registerRoomHandlers(io, socket) {
           userId,
           name,
           email,
-          requestedAt: new Date().toISOString(),
+          requestedAt: Date.now(),
         });
 
         const ownerSockets = getUserSockets(io, roomMeta.ownerId);
@@ -77,41 +111,18 @@ function registerRoomHandlers(io, socket) {
         }
 
         socket.emit("room:error", {
-          code: "PENDING_APPROVAL",
-          message: "Join request sent. Awaiting owner approval.",
+          roomId,
+          code: "pending_role_assignment",
+          message: "Waiting for room owner to assign your role",
         });
         return;
       }
 
-      socket.join(roomId);
-      await roomService.clearPendingJoinRequest(roomId, userId);
-
-      const room = await getRoom(roomId);
-
-      room.presence.set(socket.id, {
-        userId,
-        name: name || userId.slice(0, 8),
-        color: `#${Math.floor(Math.random() * 16777215).toString(16)}`,
-        online: true,
-        lastSeen: Date.now(),
-      });
-
-      await emitRoomSnapshot(socket, roomId);
-
-      socket.emit("fs:snapshot", {
-        roomId,
-        nodes: room.tree,
-      });
-
-      socket.emit("presence:update", {
-        roomId,
-        users: [...room.presence.values()],
-      });
-
-      socket.to(roomId).emit("presence:join", room.presence.get(socket.id));
+      await finalizeRoomJoin(socket, roomId, userId, name);
     } catch (err) {
       console.error("Room join failed:", err);
       socket.emit("room:error", {
+        roomId,
         message: "Room join failed",
       });
     }
@@ -121,7 +132,8 @@ function registerRoomHandlers(io, socket) {
     try {
       if (!socket.userId) {
         socket.emit("room:error", {
-          code: "UNAUTHORIZED",
+          roomId,
+          code: "forbidden",
           message: "Unauthorized",
         });
         return;
@@ -129,7 +141,8 @@ function registerRoomHandlers(io, socket) {
 
       if (!ALLOWED_ASSIGNABLE_ROLES.has(role)) {
         socket.emit("room:error", {
-          code: "INVALID_ROLE",
+          roomId,
+          code: "forbidden",
           message: "Invalid role",
         });
         return;
@@ -138,7 +151,8 @@ function registerRoomHandlers(io, socket) {
       const roomMeta = await roomService.getRoomWithMembers(roomId);
       if (!roomMeta) {
         socket.emit("room:error", {
-          code: "ROOM_NOT_FOUND",
+          roomId,
+          code: "room_not_found",
           message: "Room not found",
         });
         return;
@@ -146,22 +160,35 @@ function registerRoomHandlers(io, socket) {
 
       if (roomMeta.ownerId !== socket.userId) {
         socket.emit("room:error", {
-          code: "FORBIDDEN",
+          roomId,
+          code: "forbidden",
           message: "Only the owner can assign roles",
         });
         return;
       }
 
       await roomService.assignRole({ roomId, userId, role });
-      await roomService.clearPendingJoinRequest(roomId, userId);
+
+      const pendingRequest = await roomService.getPendingJoinRequest(roomId, userId);
+
+      const ownerSockets = getUserSockets(io, roomMeta.ownerId);
+      for (const ownerSocket of ownerSockets) {
+        await emitRoomSnapshot(ownerSocket, roomId);
+      }
 
       const targetSockets = getUserSockets(io, userId);
       for (const targetSocket of targetSockets) {
-        await emitRoomSnapshot(targetSocket, roomId);
+        await finalizeRoomJoin(
+          targetSocket,
+          roomId,
+          userId,
+          pendingRequest?.name
+        );
       }
     } catch (err) {
       console.error("Room role assignment failed:", err);
       socket.emit("room:error", {
+        roomId,
         message: "Room role assignment failed",
       });
     }
