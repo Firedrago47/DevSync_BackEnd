@@ -9,8 +9,13 @@ if (!DEV_MODE) {
 
 const devRooms = new Map();
 const devMembers = new Map();
+const pendingJoinRequests = new Map();
 
 function getMemberKey(roomId, userId) {
+  return `${roomId}:${userId}`;
+}
+
+function getPendingKey(roomId, userId) {
   return `${roomId}:${userId}`;
 }
 
@@ -118,17 +123,7 @@ async function isMember(roomId, userId) {
 
     const key = getMemberKey(roomId, userId);
     const existing = devMembers.get(key);
-    if (existing) {
-      return { role: existing.role };
-    }
-
-    const autoAdded = {
-      roomId,
-      userId,
-      role: "editor",
-    };
-    devMembers.set(key, autoAdded);
-    return { role: autoAdded.role };
+    return existing ? { role: existing.role } : null;
   }
 
   const { data, error } = await supabase
@@ -146,8 +141,61 @@ async function isMember(roomId, userId) {
   return data; // { role } | null
 }
 
+/* ---------- Pending join requests ---------- */
+async function upsertPendingJoinRequest({
+  roomId,
+  userId,
+  name,
+  email,
+  requestedAt,
+}) {
+  const payload = {
+    roomId,
+    userId,
+    name: name || userId,
+    email: email || null,
+    requestedAt: requestedAt || new Date().toISOString(),
+  };
+
+  pendingJoinRequests.set(getPendingKey(roomId, userId), payload);
+  return payload;
+}
+
+async function clearPendingJoinRequest(roomId, userId) {
+  pendingJoinRequests.delete(getPendingKey(roomId, userId));
+}
+
+/* ---------- Assign role ---------- */
+async function assignRole({ roomId, userId, role }) {
+  if (DEV_MODE) {
+    devMembers.set(getMemberKey(roomId, userId), {
+      roomId,
+      userId,
+      role,
+    });
+    return { role };
+  }
+
+  const { error } = await supabase.from("room_members").upsert(
+    {
+      room_id: roomId,
+      user_id: userId,
+      role,
+    },
+    {
+      onConflict: "room_id,user_id",
+    }
+  );
+
+  if (error) throw error;
+  return { role };
+}
+
 module.exports = {
   createRoom,
   getRoomWithMembers,
   isMember,
+  upsertPendingJoinRequest,
+  clearPendingJoinRequest,
+  assignRole,
 };
