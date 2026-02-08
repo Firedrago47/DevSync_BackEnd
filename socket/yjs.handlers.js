@@ -5,6 +5,7 @@ function registerYjsHandlers(io, socket) {
   socket.on("yjs:join", async ({ roomId, fileId }) => {
     const doc = await getYDoc(roomId, fileId);
     socket.emit("yjs:sync", {
+      roomId,
       fileId,
       update: Array.from(Y.encodeStateAsUpdate(doc)),
     });
@@ -18,6 +19,7 @@ function registerYjsHandlers(io, socket) {
     Y.applyUpdate(doc, bytes);
 
     socket.to(roomId).emit("yjs:update", {
+      roomId,
       fileId,
       update: Array.from(bytes),
     });
