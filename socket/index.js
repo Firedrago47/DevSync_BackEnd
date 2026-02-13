@@ -3,6 +3,7 @@ const registerRoomHandlers = require("./room.handlers");
 const registerFsHandlers = require("./fs.handlers");
 const registerYjsHandlers = require("./yjs.handlers");
 const registerPresenceHandlers = require("./presence.handlers");
+const registerTerminalHandlers = require("./terminal.handlers");
 const { startRoomGC } = require("./state");
 
 function getAllowedOrigins() {
@@ -38,6 +39,7 @@ function initSocket(server) {
     registerFsHandlers(io, socket);
     registerYjsHandlers(io, socket);
     registerPresenceHandlers(io, socket);
+    registerTerminalHandlers(io, socket);
   });
 
   startRoomGC();
