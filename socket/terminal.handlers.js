@@ -103,7 +103,7 @@ function registerTerminalHandlers(io, socket) {
       sessions.set(key, session);
 
       emitSession(socket, roomId, sessionId, "starting");
-      emitLog(socket, `Running ${sourceFile.node.name} with Piston...`, "system");
+      emitLog(socket, `Running ${sourceFile.node.name}...`, "system");
       emitSession(socket, roomId, sessionId, "running");
 
       session.timeout = setTimeout(() => {
