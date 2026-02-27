@@ -7,6 +7,9 @@ const MAX_LOG_CHARS = Number(process.env.TERMINAL_MAX_LOG_CHARS || 8000);
 const PISTON_URL =
   process.env.PISTON_URL || "https://emkc.org/api/v2/piston/execute";
 const PISTON_PYTHON_VERSION = process.env.PISTON_PYTHON_VERSION || "*";
+const PISTON_API_KEY = process.env.PISTON_API_KEY || process.env.PISTON_AUTH_TOKEN || "";
+const PISTON_API_KEY_HEADER = process.env.PISTON_API_KEY_HEADER || "Authorization";
+const PISTON_API_KEY_PREFIX = process.env.PISTON_API_KEY_PREFIX || "Bearer";
 
 const sessions = new Map();
 
@@ -31,6 +34,24 @@ function emitLog(socket, message, type = "system") {
     message: clipLog(message),
     type,
   });
+}
+
+function buildPistonHeaders() {
+  const headers = {
+    "Content-Type": "application/json",
+  };
+
+  // Public emkc Piston should be called without auth headers.
+  if (PISTON_URL.includes("emkc.org/api/v2/piston/execute")) return headers;
+
+  if (!PISTON_API_KEY) return headers;
+
+  const headerName = String(PISTON_API_KEY_HEADER || "").trim();
+  if (!headerName) return headers;
+
+  const prefix = String(PISTON_API_KEY_PREFIX || "").trim();
+  headers[headerName] = prefix ? `${prefix} ${PISTON_API_KEY}` : PISTON_API_KEY;
+  return headers;
 }
 
 function pickPythonNode(tree, preferredFileId) {
@@ -119,9 +140,7 @@ function registerTerminalHandlers(io, socket) {
 
       const response = await fetch(PISTON_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: buildPistonHeaders(),
         signal: abortController.signal,
         body: JSON.stringify({
           language: "python",
