@@ -3,6 +3,21 @@ const roomService = require("../storage/room.service");
 
 const router = express.Router();
 
+router.get("/", async (req, res) => {
+  const userId = req.query.userId?.toString().trim();
+  if (!userId) {
+    return res.status(400).json({ error: "userId is required" });
+  }
+
+  try {
+    const rooms = await roomService.getRoomsForUser(userId);
+    return res.json({ rooms });
+  } catch (err) {
+    console.error("Failed to fetch rooms for user:", err);
+    return res.status(500).json({ error: "Internal error" });
+  }
+});
+
 router.get("/:roomId", async (req, res) => {
   const { roomId } = req.params;
 

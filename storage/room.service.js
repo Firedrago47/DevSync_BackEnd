@@ -196,6 +196,53 @@ async function assignRole({ roomId, userId, role }) {
   return { role };
 }
 
+/* ---------- List rooms for user ---------- */
+async function getRoomsForUser(userId) {
+  if (!userId) return [];
+
+  if (DEV_MODE) {
+    const result = [];
+    for (const member of devMembers.values()) {
+      if (member.userId !== userId) continue;
+      const room = devRooms.get(member.roomId);
+      if (!room) continue;
+      result.push({
+        id: room.id,
+        name: room.name,
+        ownerId: room.ownerId,
+        role: member.role,
+      });
+    }
+    return result;
+  }
+
+  const { data, error } = await supabase
+    .from("room_members")
+    .select(`
+      role,
+      rooms!inner (
+        id,
+        name,
+        owner_id
+      )
+    `)
+    .eq("user_id", userId);
+
+  if (error) {
+    console.error("getRoomsForUser error:", error);
+    return [];
+  }
+
+  return (data || [])
+    .map((row) => ({
+      id: row.rooms?.id,
+      name: row.rooms?.name,
+      ownerId: row.rooms?.owner_id,
+      role: row.role,
+    }))
+    .filter((room) => room.id && room.name && room.ownerId);
+}
+
 module.exports = {
   createRoom,
   getRoomWithMembers,
@@ -204,4 +251,5 @@ module.exports = {
   getPendingJoinRequest,
   clearPendingJoinRequest,
   assignRole,
+  getRoomsForUser,
 };
