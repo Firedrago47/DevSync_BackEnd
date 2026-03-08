@@ -5,6 +5,7 @@ const registerYjsHandlers = require("./yjs.handlers");
 const registerPresenceHandlers = require("./presence.handlers");
 const registerTerminalHandlers = require("./terminal.handlers");
 const registerChatHandlers = require("./chat.handlers");
+const registerVoiceHandlers = require("./voice.handlers");
 const { startRoomGC } = require("./state");
 
 function getAllowedOrigins() {
@@ -42,6 +43,7 @@ function initSocket(server) {
     registerPresenceHandlers(io, socket);
     registerTerminalHandlers(io, socket);
     registerChatHandlers(io, socket);
+    registerVoiceHandlers(io, socket);
   });
 
   startRoomGC();

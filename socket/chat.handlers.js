@@ -1,5 +1,6 @@
 const crypto = require("crypto");
 const roomService = require("../storage/room.service");
+const { appendChatMessage } = require("./chat.state");
 
 const MAX_CHAT_MESSAGE_LENGTH = 2000;
 
@@ -58,6 +59,7 @@ function registerChatHandlers(io, socket) {
             : Date.now(),
       };
 
+      appendChatMessage(roomId, message);
       io.to(roomId).emit("collab:message", message);
     } catch (err) {
       console.error("collab:message failed:", err);
@@ -66,4 +68,3 @@ function registerChatHandlers(io, socket) {
 }
 
 module.exports = registerChatHandlers;
-

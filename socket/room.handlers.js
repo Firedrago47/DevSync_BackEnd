@@ -1,5 +1,6 @@
 const roomService = require("../storage/room.service");
 const { getRoom, rooms } = require("./state");
+const { getChatHistory } = require("./chat.state");
 
 const ALLOWED_ASSIGNABLE_ROLES = new Set(["viewer", "editor"]);
 
@@ -58,6 +59,11 @@ async function finalizeRoomJoin(socket, roomId, userId, name) {
   socket.emit("presence:update", {
     roomId,
     users: [...room.presence.values()],
+  });
+
+  socket.emit("collab:history", {
+    roomId,
+    messages: getChatHistory(roomId),
   });
 
   socket.to(roomId).emit("presence:join", room.presence.get(socket.id));
