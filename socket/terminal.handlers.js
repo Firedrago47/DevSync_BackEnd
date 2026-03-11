@@ -5,7 +5,7 @@ const { getRoom, getYDoc } = require("./state");
 const TERMINAL_TIMEOUT_MS = Number(process.env.TERMINAL_TIMEOUT_MS || 15000);
 const MAX_LOG_CHARS = Number(process.env.TERMINAL_MAX_LOG_CHARS || 8000);
 
-const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL || "https://judge0-ce.p.rapidapi.com";
+const JUDGE0_BASE_URL = process.env.JUDGE0_BASE_URL;
 const JUDGE0_POLL_INTERVAL_MS = Number(process.env.JUDGE0_POLL_INTERVAL_MS || 750);
 const JUDGE0_WAIT_MODE = String(process.env.JUDGE0_WAIT_MODE || "false").toLowerCase() === "true";
 const JUDGE0_API_KEY = process.env.JUDGE0_API_KEY || "";
