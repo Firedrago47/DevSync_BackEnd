@@ -1,52 +1,70 @@
-# DevSync: Interview Documentation
+# DevSync Platform Documentation
 
-Last updated: February 23, 2026
+Last updated: March 10, 2026
 
-## 1. Elevator Pitch
-DevSync is a realtime collaborative coding platform where multiple users can:
-- create/join rooms,
-- edit a shared file tree,
-- co-edit file content using Yjs CRDT,
-- see collaborator presence,
-- enforce owner-approved role access (`owner` / `editor` / `viewer`),
-- run Python files through Judge0 and stream logs into the UI.
+## 1. What DevSync Is
+DevSync is a realtime collaborative coding platform.
 
-This repo (`DevSync_BackEnd`) is the backend.  
-Frontend lives in `../devsync` (Next.js app).
+Core capabilities:
+- Room creation and role-based access (`owner`, `editor`, `viewer`)
+- Owner approval flow for new joiners
+- Shared file tree (create/rename/delete)
+- Realtime co-editing with Yjs CRDT
+- Presence and awareness updates
+- Room chat
+- Voice signaling for WebRTC calling
+- Code execution through Judge0 (multi-language)
 
-## 2. Architecture Overview
+Codebase split:
+- Backend: `DevSync_BackEnd` (this repo)
+- Frontend: `../devsync` (Next.js)
+
+---
+
+## 2. High-Level Architecture
+
 ```text
-Frontend (Next.js + Socket.IO client + Zustand + Editor)
-        |
-        | HTTP + Socket.IO
-        v
-Backend (Express + Socket.IO + Yjs state manager)
-        |
-        | metadata
-        v
+Frontend (Next.js, Zustand, Monaco, Socket.IO client)
+            |
+            | HTTP + Socket.IO
+            v
+Backend (Express + Socket.IO + Yjs runtime)
+            |
+            | metadata
+            v
 Supabase Postgres (rooms, room_members)
-        |
-        | blobs
-        v
-Object Storage (Supabase bucket / local / s3)
+            |
+            | file tree + ydoc blobs
+            v
+Storage Provider (Supabase bucket / local / S3)
   - rooms/<roomId>/tree.json
   - rooms/<roomId>/files/<fileId>.ydoc
 ```
 
-## 3. Monorepo/Project Layout
+Execution engine:
+- Backend submits code to Judge0 API and streams logs to frontend terminal UI.
+
+---
+
+## 3. Backend Folder Layout
+
 ```text
 DevSync_BackEnd/
   app.js
   server.js
-  routes/room.routes.js
+  routes/
+    room.routes.js
   socket/
     index.js
+    state.js
     room.handlers.js
     fs.handlers.js
     yjs.handlers.js
     presence.handlers.js
+    chat.handlers.js
+    chat.state.js
+    voice.handlers.js
     terminal.handlers.js
-    state.js
   storage/
     index.js
     room.service.js
@@ -54,40 +72,35 @@ DevSync_BackEnd/
     supabase.provider.js
     local.provider.js
     s3.provider.js
-
-../devsync/
-  app/
-  features/collaboration/client/*
-  features/filesystem/*
-  features/editor/*
-  features/terminal/*
-  features/rooms/*
-  ui/layout/*
 ```
 
-## 4. Backend Lifecycle
-1. `server.js` boots HTTP server and Socket.IO.
-2. `socket/index.js` configures CORS and registers handlers.
-3. Handlers split responsibilities:
-- room access and approvals: `socket/room.handlers.js`
-- file tree ops: `socket/fs.handlers.js`
-- CRDT sync: `socket/yjs.handlers.js`
-- awareness/presence: `socket/presence.handlers.js`
-- code run logs: `socket/terminal.handlers.js`
-4. In-memory runtime state is managed in `socket/state.js`.
+Key runtime state:
+- `socket/state.js`: room in-memory runtime, Yjs docs, presence maps
+- `socket/chat.state.js`: in-memory chat history per room
+- `storage/room.service.js`: room/membership persistence + pending join requests map
 
-## 5. Data Model
-Current persistent model:
+---
+
+## 4. Data Model
+
+Persistent tables:
 - `rooms`: `id`, `name`, `owner_id`
 - `room_members`: `room_id`, `user_id`, `role`
-- storage object keys:
-  - `rooms/<roomId>/tree.json`
-  - `rooms/<roomId>/files/<fileId>.ydoc`
 
-Join requests are currently in-memory only (`pendingJoinRequests` map in `storage/room.service.js`), so they reset on backend restart.
+Storage objects:
+- `rooms/<roomId>/tree.json`
+- `rooms/<roomId>/files/<fileId>.ydoc`
 
-## 6. Realtime Event Contract
-### Room
+Current non-persistent data:
+- pending join requests (in-memory map)
+- in-memory voice peer state
+- in-memory chat history
+
+---
+
+## 5. Socket Event Contract (Current)
+
+### 5.1 Room
 Client -> Server:
 - `room:create` `{ name, userId }`
 - `room:join` `{ roomId, userId, name?, email? }`
@@ -96,28 +109,18 @@ Client -> Server:
 
 Server -> Client:
 - `room:created` `{ roomId }`
-- `room:snapshot`
+- `room:snapshot` `{ roomId, room, members, tree }`
 - `room:error` `{ roomId?, code?, message }`
 - `room:join-request` `{ roomId, userId, name, email?, requestedAt }`
 
-`room:snapshot` payload shape:
-```json
-{
-  "roomId": "string",
-  "room": { "id": "string", "name": "string", "ownerId": "string" },
-  "members": [{ "userId": "string", "role": "owner|editor|viewer" }],
-  "tree": []
-}
-```
-
-Stable room error codes used:
+Stable `room:error.code` values:
 - `pending_role_assignment`
 - `forbidden`
 - `room_not_found`
 
-### File Tree
+### 5.2 File Tree
 Client -> Server:
-- `fs:create` `{ roomId, parentId?, name, type }`
+- `fs:create` `{ roomId, parentId, name, type }`
 - `fs:rename` `{ roomId, id, name }`
 - `fs:delete` `{ roomId, id }`
 
@@ -127,9 +130,7 @@ Server -> Client:
 - `fs:rename` `<node>`
 - `fs:delete` `{ id }`
 
-Note: broadcast payloads for `fs:create`/`fs:rename` currently do not include `roomId`.
-
-### Yjs
+### 5.3 Yjs
 Client -> Server:
 - `yjs:join` `{ roomId, fileId }`
 - `yjs:update` `{ roomId, fileId, update }`
@@ -138,122 +139,138 @@ Server -> Client:
 - `yjs:sync` `{ roomId, fileId, update }`
 - `yjs:update` `{ roomId, fileId, update }`
 
-### Presence
+### 5.4 Presence + Awareness
 Client -> Server:
 - `awareness:update` `{ roomId, ... }`
 
 Server -> Client:
-- `presence:update` (full online list)
+- `presence:update` (full list)
 - `presence:join` (single user)
 - `presence:leave` (single user)
 - `awareness:update` (forwarded)
 
-### Terminal (Judge0-backed)
+### 5.5 Chat
+Client -> Server:
+- `collab:message` `{ roomId, channel, text, senderName, ... }`
+
+Server -> Client:
+- `collab:message` `<message>`
+- `collab:history` `{ roomId, messages }` (on join)
+
+### 5.6 Voice Signaling (WebRTC signaling only)
+Client -> Server:
+- `webrtc:join` `{ roomId, name?, muted? }`
+- `webrtc:leave` `{ roomId }`
+- `webrtc:mute` `{ roomId, muted }`
+- `webrtc:offer` `{ roomId, targetSocketId, sdp }`
+- `webrtc:answer` `{ roomId, targetSocketId, sdp }`
+- `webrtc:ice-candidate` `{ roomId, targetSocketId, candidate }`
+
+Server -> Client:
+- `webrtc:peers` `{ roomId, peers[] }`
+- `webrtc:peer-joined` `{ roomId, peer }`
+- `webrtc:peer-updated` `{ roomId, peer }`
+- `webrtc:peer-left` `{ roomId, socketId, userId }`
+- `webrtc:offer` `{ roomId, fromSocketId, sdp }`
+- `webrtc:answer` `{ roomId, fromSocketId, sdp }`
+- `webrtc:ice-candidate` `{ roomId, fromSocketId, candidate }`
+
+### 5.7 Terminal
 Client -> Server:
 - `terminal:start` `{ roomId, fileId? }`
-- `terminal:input` `{ roomId, input }`
+- `terminal:input` `{ roomId, input }` (currently non-interactive)
 - `terminal:stop` `{ roomId }`
 
 Server -> Client:
 - `terminal:session` `{ id, roomId, status }`
 - `terminal:log` `{ id, timestamp, message, type }`
 
-Important behavior:
-- runs are non-interactive; `terminal:input` returns a system message saying stdin is not supported.
+---
 
-## 7. Core Flows
-### A. Room Creation
-1. Owner emits `room:create`.
-2. Backend inserts room + owner membership.
-3. Backend emits `room:created`.
+## 6. Core Runtime Flows
 
-### B. Join Approval Flow
+### 6.1 Room Join Approval
 1. User emits `room:join`.
-2. If already in `room_members`, join is finalized immediately.
+2. Backend checks `room_members`.
 3. If not a member:
-- backend stores pending request (in memory),
-- emits `room:join-request` to owner sockets,
-- emits `room:error` with `pending_role_assignment` to joiner.
+   - stores pending request (in-memory)
+   - emits `room:join-request` to owner sockets
+   - emits `room:error` with `pending_role_assignment` to joiner
 4. Owner emits `room:assign-role`.
 5. Backend upserts membership.
-6. Backend emits updated `room:snapshot` to owner and assigned user.
-7. Assigned user receives `fs:snapshot` + `presence:update`.
+6. Backend finalizes join and emits `room:snapshot`, `fs:snapshot`, `presence:update`, `collab:history`.
 
-### C. Collaborative Files
-1. Editor/owner mutates tree via `fs:*`.
-2. Backend role-checks (`viewer` is blocked).
-3. Updated tree is saved to `tree.json`.
-4. Change is broadcast to room.
+### 6.2 Realtime Editing
+1. Client opens file -> `yjs:join`.
+2. Backend returns current document with `yjs:sync`.
+3. Edits stream via `yjs:update`.
+4. Backend rebroadcasts updates and persists document snapshots.
 
-### D. Collaborative Editor (Yjs)
-1. On file open, client emits `yjs:join`.
-2. Backend sends `yjs:sync` with full state update.
-3. Incremental edits are sent via `yjs:update`.
-4. Backend applies updates and rebroadcasts.
-5. Debounced persistence writes `.ydoc` updates to storage.
+### 6.3 Judge0 Execution
+1. User clicks run -> `terminal:start` with selected `fileId`.
+2. Backend resolves runnable file by extension.
+3. Backend maps extension to Judge0 `language_id`.
+4. Backend submits code to Judge0 and polls until finished.
+5. Backend emits stdout/stderr/system lines through `terminal:log`.
 
-### E. Code Execution (Python)
-1. User clicks run, frontend emits `terminal:start`.
-2. Backend resolves target `.py` file from tree / selected file.
-3. Backend submits source to Judge0 API and polls result.
-4. Stdout/stderr/system logs stream to client as `terminal:log`.
-5. UI shows logs in Terminal/Problems/Output tabs.
+Supported extensions (default mapping):
+- `.py` -> 71
+- `.js` -> 63
+- `.ts` -> 74
+- `.c` -> 50
+- `.cpp`, `.cc`, `.cxx` -> 54
+- `.java` -> 62
+- `.go` -> 60
+- `.rs` -> 73
 
-## 8. API Surface
-HTTP:
-- `GET /api/rooms/:roomId` -> room metadata + members
+---
 
-Example:
-```json
-{
-  "id": "382b803f-6132-4008-9af8-a1286f37a79f",
-  "name": "Interview Room",
-  "ownerId": "user_123",
-  "members": [
-    { "userId": "user_123", "role": "owner" },
-    { "userId": "user_456", "role": "editor" }
-  ]
-}
-```
+## 7. Environment Variables
 
-## 9. Environment Variables
-### Backend (`DevSync_BackEnd/.env`)
-Required for Supabase mode:
+## 7.1 Backend (`DevSync_BackEnd/.env`)
+Core:
+- `PORT=6969`
+- `CLIENT_ORIGIN`
+- `CLIENT_ORIGIN_DEV=http://localhost:3000`
+
+Storage/Supabase mode:
 - `STORAGE_PROVIDER=supabase`
 - `SUPABASE_URL`
 - `SUPABASE_SERVICE_ROLE_KEY`
 - `SUPABASE_BUCKET`
 
-Networking:
-- `PORT=6969`
-- `CLIENT_ORIGIN` (production web origin(s), comma-separated allowed)
-- `CLIENT_ORIGIN_DEV=http://localhost:3000`
+Dev mode (optional):
+- `DEV_MODE=true`
 
-Optional:
-- `DEV_MODE=true` (uses in-memory rooms/members for development)
+Terminal/Judge0:
 - `TERMINAL_TIMEOUT_MS=15000`
 - `TERMINAL_MAX_LOG_CHARS=8000`
-- `JUDGE0_BASE_URL` (for example `https://judge0-ce.p.rapidapi.com`)
-- `JUDGE0_LANGUAGE_ID=71` (Python 3)
+- `JUDGE0_BASE_URL`
 - `JUDGE0_POLL_INTERVAL_MS=750`
 - `JUDGE0_WAIT_MODE=false`
-- `JUDGE0_API_KEY` (required when your Judge0 host enforces auth)
-- `JUDGE0_API_KEY_HEADER=X-RapidAPI-Key` (or provider-specific header)
-- `JUDGE0_HOST` (optional host header value for RapidAPI variants)
-- `JUDGE0_HOST_HEADER=X-RapidAPI-Host`
+- `JUDGE0_API_KEY` (if required by your Judge0 host)
+- `JUDGE0_API_KEY_HEADER` (default `X-RapidAPI-Key`)
+- `JUDGE0_HOST` (optional)
+- `JUDGE0_HOST_HEADER` (default `X-RapidAPI-Host`)
 
-### Frontend (`../devsync/.env.local`)
-- `NEXT_PUBLIC_SOCKET_URL` or `NEXT_PUBLIC_WS_URL`
+Optional language-id overrides:
+- `JUDGE0_LANGUAGE_ID_PY`
+- `JUDGE0_LANGUAGE_ID_JS`
+- `JUDGE0_LANGUAGE_ID_TS`
+- `JUDGE0_LANGUAGE_ID_C`
+- `JUDGE0_LANGUAGE_ID_CPP`
+- `JUDGE0_LANGUAGE_ID_JAVA`
+- `JUDGE0_LANGUAGE_ID_GO`
+- `JUDGE0_LANGUAGE_ID_RS`
+
+## 7.2 Frontend (`../devsync/.env.local`)
 - `NEXT_PUBLIC_BACKEND_URL`
-- auth-related vars (`NEXTAUTH_URL`, provider keys, etc.)
+- NextAuth/provider vars (`NEXTAUTH_URL`, provider keys, etc.)
 
-Socket target resolution priority:
-1. `NEXT_PUBLIC_SOCKET_URL`
-2. `NEXT_PUBLIC_WS_URL`
-3. `NEXT_PUBLIC_BACKEND_URL`
-4. `window.location.origin`
+---
 
-## 10. Local Setup
+## 8. Local Development Setup
+
 ### Backend
 ```bash
 cd /home/fire/Documents/Projects/DevSync_BackEnd
@@ -268,59 +285,133 @@ npm install
 npm run dev
 ```
 
-Open: `http://localhost:3000`
+Open `http://localhost:3000`.
 
-## 11. Common Issues and Fixes
-### `xhr poll error` / `NetworkError when attempting to fetch resource`
-- wrong frontend socket URL env,
-- backend not reachable,
-- backend CORS origins missing your frontend origin.
+---
 
-### Room joins but no collaboration
-- check user membership row in `room_members`,
-- verify both clients joined same `roomId`,
-- ensure both clients opened same `fileId` for Yjs.
+## 9. Deployment Model
 
-### Files not visible for second user
-- confirm owner assigned role and backend emitted `room:snapshot`/`fs:snapshot`,
-- verify client listeners are mounted (`room.hooks`, FS subscription).
+Recommended split:
+- Frontend: Vercel
+- Backend: Railway
+- Judge0: self-hosted (Railway or dedicated host) or managed endpoint
+- Storage/DB: Supabase
 
-### No run output
-- confirm selected room has at least one `.py` file,
-- check `terminal:log` events arrive in browser network/socket inspector,
-- verify Judge0 endpoint is reachable from backend.
+Important production notes:
+- Ensure backend CORS includes your frontend domain(s).
+- Ensure backend can reach Judge0 URL.
+- Use server-side secrets only (never expose Judge0 keys to frontend).
 
-## 12. Security and Reliability Notes
+---
+
+## 10. Security Notes
+
 Current strengths:
-- role-gated file tree mutation,
-- room membership checks for join/fs/terminal,
-- server-side persisted tree and doc snapshots.
+- Membership checks on room join, fs operations, terminal execution, chat
+- Owner-only role assignment flow
 
-Current gaps to mention honestly in interview:
-- socket auth trusts client-sent `userId` (no JWT verification middleware),
-- pending join requests are non-persistent in-memory state,
-- Yjs handlers currently do not enforce explicit membership checks.
+Known gaps / improvements:
+- Socket auth still relies on client-provided identity in some paths (add strict server auth middleware)
+- Pending join requests are in-memory only (persist in DB)
+- Chat/voice histories are memory-scoped (no durable history)
 
-## 13. Scalability Notes
-- In-memory room/doc cache is efficient for single-node deployment.
-- Room GC removes idle rooms from memory after inactivity.
-- For horizontal scaling, you need:
-  - sticky sessions,
-  - shared adapter/state (e.g., Redis adapter),
-  - distributed presence/session state.
+---
 
-## 14. Suggested Roadmap
-1. Add socket auth middleware with JWT/session verification.
-2. Persist pending join requests in Postgres.
-3. Add membership checks in Yjs handlers.
-4. Add integration tests for realtime contracts.
-5. Add observability (structured logs, metrics, tracing).
+## 11. Troubleshooting
 
-## 15. Interview Demo Script (5 Minutes)
-1. User A creates a room.
-2. User B joins and gets pending approval state.
-3. User A sees `room:join-request` and assigns `editor`.
-4. User B appears in collaborators list and gets room snapshot.
-5. User B creates/renames file; User A sees update.
-6. Both open same file and type simultaneously; live Yjs sync is visible.
-7. Run Python file and show logs in Output tab.
+### Room stuck or join hangs
+- Verify backend reachable from frontend URL
+- Verify room exists and user has membership (or owner approved)
+
+### `room:error` with `pending_role_assignment`
+- Expected until owner assigns `viewer`/`editor`
+
+### Terminal shows no output
+- Verify selected file extension is supported
+- Verify Judge0 URL/credentials
+- Check backend logs for Judge0 HTTP errors
+
+### Judge0 `401 Invalid API key`
+- Wrong/missing Judge0 key header for provider
+- If self-hosted Judge0, usually no RapidAPI headers are needed
+
+### Voice issues
+- WebRTC needs network-compatible STUN/TURN setup for broad NAT cases
+- Current implementation is signaling + P2P; large rooms require SFU architecture
+
+---
+
+## 12. Interview Demo Script (5–7 min)
+1. Create room as User A.
+2. Join as User B -> show pending approval state.
+3. Approve User B as editor from User A.
+4. Show both users in collaboration/presence.
+5. Create/rename files and show realtime sync.
+6. Open same file in both clients and co-edit live.
+7. Run code from terminal and show Judge0-backed output.
+8. Send chat message and show realtime delivery.
+9. Open voice dock and show signaling join/mute/leave behavior.
+
+---
+
+## 13. Current Platform Summary
+DevSync currently delivers a complete collaborative coding baseline:
+- role-gated room access
+- shared filesystem + CRDT editing
+- presence/chat/voice signaling
+- multi-language cloud execution through Judge0
+
+Next milestone should focus on production hardening:
+- strict socket auth
+- persistent pending requests/history
+- scalable voice architecture (TURN/SFU)
+- deeper observability and e2e tests.
+
+Problem Statement:
+
+Open-source contributors, especially students and first-time contributors, struggle to collaborate in real time across fragmented tools (chat apps, code editors, docs, and review systems). This slows learning, increases onboarding friction, and makes mentor-guided contribution sessions hard to run.
+
+This platform solves that by providing a single educational collaboration workspace where contributors can:
+
+create/join project rooms with role-based access,
+request approval and receive guided onboarding by room owners/mentors,
+co-edit code in real time with presence awareness,
+communicate through chat and voice in context,
+run and validate code directly in the shared environment.
+
+In short: it reduces coordination overhead and enables structured, mentor-friendly, real-time open-source contribution learning.
+
+Use Cases (Educational / Mentoring Focus)
+
+Guided OSS Onboarding Sessions
+Mentor creates a room, admits contributors, assigns viewer/editor, and walks through project structure and contribution workflow live.
+
+Collaborative Codebase Reading
+Small groups open the same files, annotate/discuss logic in real time, and build shared understanding of unfamiliar FOSS codebases.
+
+Mentored Bug Reproduction Practice
+Contributor runs sample code in the shared environment, posts output, and gets immediate mentor feedback on debugging steps.
+
+PR Preparation Workshops
+Teams draft and refine contribution changes collaboratively before opening a real PR in upstream repositories.
+
+Pair/Mob Learning for First-Time Contributors
+Multiple learners co-edit while mentor supervises, correcting misconceptions early and explaining standards.
+
+Role-Based Review Simulations
+Owner sets some users as viewer (review role) and others as editor (implementation role) to simulate real contribution dynamics.
+
+Live Code Review Training
+Mentor reviews contributor edits line-by-line, explains design tradeoffs, and demonstrates clean patching patterns.
+
+Contributor Communication Drills
+In-room chat + voice are used for structured technical discussion, async notes, and review decisions during learning sessions.
+
+Portable Classroom/Lab Environment
+No complex local setup per learner; participants join the same room and focus on learning/contributing rather than environment issues.
+
+Community Cohort Programs
+Open-source communities run weekly cohorts where maintainers mentor newcomers in a repeatable, shared collaboration workflow.
+
+Positioning Statement
+This platform is for education and mentorship in open-source contribution. It is not currently a build/deploy CI platform; it is a guided collaborative workspace for understanding codebases, practicing contributions, and receiving mentor support.
