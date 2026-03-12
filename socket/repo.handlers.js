@@ -58,6 +58,14 @@ function cloneRepo(repoUrl, targetDir) {
 
     child.on("error", (err) => {
       clearTimeout(timer);
+      if (err && err.code === "ENOENT") {
+        reject(
+          new Error(
+            "Git is not installed on the server environment (spawn git ENOENT). Install git in deployment image."
+          )
+        );
+        return;
+      }
       reject(err);
     });
 
