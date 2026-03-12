@@ -1,8 +1,10 @@
-const fs = require("fs/promises");
+const fsp = require("fs/promises");
+const nodeFs = require("fs");
 const path = require("path");
 const os = require("os");
-const { spawn } = require("child_process");
 const crypto = require("crypto");
+const git = require("isomorphic-git");
+const http = require("isomorphic-git/http/node");
 const Y = require("yjs");
 const storage = require("../storage");
 const roomService = require("../storage/room.service");
@@ -35,50 +37,22 @@ function normalizeRepoUrl(url) {
 }
 
 function cloneRepo(repoUrl, targetDir) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "git",
-      ["clone", "--depth", "1", repoUrl, targetDir],
-      { stdio: ["ignore", "pipe", "pipe"] }
-    );
+  const cloneTask = git.clone({
+    fs: nodeFs,
+    http,
+    dir: targetDir,
+    url: repoUrl,
+    singleBranch: true,
+    depth: 1,
+  });
 
-    let stderr = "";
-    let stdout = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString("utf-8");
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString("utf-8");
-    });
-
-    const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+  const timeoutTask = new Promise((_, reject) => {
+    setTimeout(() => {
       reject(new Error(`Clone timed out after ${CLONE_TIMEOUT_MS}ms`));
     }, CLONE_TIMEOUT_MS);
-
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      if (err && err.code === "ENOENT") {
-        reject(
-          new Error(
-            "Git is not installed on the server environment (spawn git ENOENT). Install git in deployment image."
-          )
-        );
-        return;
-      }
-      reject(err);
-    });
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        const detail = stderr || stdout || `git clone failed (exit=${code})`;
-        reject(new Error(detail.trim()));
-      }
-    });
   });
+
+  return Promise.race([cloneTask, timeoutTask]);
 }
 
 async function buildTreeAndDocs(rootDir) {
@@ -87,7 +61,7 @@ async function buildTreeAndDocs(rootDir) {
   let fileCount = 0;
 
   async function walk(currentPath, parentId, parentVirtualPath) {
-    const entries = await fs.readdir(currentPath, { withFileTypes: true });
+    const entries = await fsp.readdir(currentPath, { withFileTypes: true });
     entries.sort((a, b) => a.name.localeCompare(b.name));
 
     for (const entry of entries) {
@@ -112,10 +86,10 @@ async function buildTreeAndDocs(rootDir) {
       if (!entry.isFile()) continue;
       if (fileCount >= MAX_REPO_FILES) continue;
 
-      const stat = await fs.stat(entryPath);
+      const stat = await fsp.stat(entryPath);
       if (stat.size > MAX_FILE_BYTES) continue;
 
-      const buffer = await fs.readFile(entryPath);
+      const buffer = await fsp.readFile(entryPath);
       if (looksLikeBinary(buffer)) continue;
 
       const source = buffer.toString("utf-8");
@@ -177,10 +151,11 @@ function registerRepoHandlers(io, socket) {
         return;
       }
 
-      const tempBase = await fs.mkdtemp(path.join(os.tmpdir(), "devsync-clone-"));
+      const tempBase = await fsp.mkdtemp(path.join(os.tmpdir(), "devsync-clone-"));
       const cloneDir = path.join(tempBase, "repo");
 
       try {
+        await fsp.mkdir(cloneDir, { recursive: true });
         await cloneRepo(repoUrl, cloneDir);
         const { tree, docs, fileCount } = await buildTreeAndDocs(cloneDir);
 
@@ -207,7 +182,7 @@ function registerRepoHandlers(io, socket) {
           totalNodes: tree.length,
         });
       } finally {
-        await fs.rm(tempBase, { recursive: true, force: true }).catch(() => {});
+        await fsp.rm(tempBase, { recursive: true, force: true }).catch(() => {});
       }
     } catch (err) {
       console.error("repo:clone failed:", err);

@@ -16,6 +16,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
+    "isomorphic-git": "^1.37.3",
     "socket.io": "^4.8.3",
     "vm2": "^3.9.19",
     "y-protocols": "^1.0.7",
