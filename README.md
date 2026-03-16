@@ -57,7 +57,7 @@ Core design decisions:
 - Voice signaling (WebRTC signaling layer)
 - Terminal execution logs via Judge0
 - Repository import into a room (clone + tree generation)
-
+    
 
 ## Environment highlights
 
